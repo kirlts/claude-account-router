@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+# claude-account-check: verify the account routing actually works.
+#
+# Read-only. It prints no secrets and changes nothing.
+#
+# The point of this command is that it checks effective state rather than the
+# presence of files: it runs the router for every routed folder and reads the
+# real account identity of every profile. A setup that merely looks installed
+# fails here.
+
+set -uo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+ROOT="$(dirname "$(dirname "$SELF")")"
+LIB="$ROOT/lib/common.sh"
+ROUTER="$ROOT/bin/claude-account-router"
+
+[ -f "$LIB" ] || { printf 'Cannot find the library at %s\n' "$LIB" >&2; exit 1; }
+# shellcheck source=../lib/common.sh
+. "$LIB"
+
+ok=0; bad=0; todo=0
+OK()   { printf '  \033[32mPASS\033[0m %s\n' "$*"; ok=$((ok + 1)); }
+BAD()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; bad=$((bad + 1)); }
+TODO() { printf '  \033[33mTODO\033[0m %s\n' "$*"; todo=$((todo + 1)); }
+INFO() { printf '  \033[90minfo\033[0m %s\n' "$*"; }
+H()    { printf '\n\033[1m%s\033[0m\n' "$*"; }
+
+# ─────────────────────────────────────────────────────── 1. editor wiring
+H "1. Editor wiring"
+if [ -x "$ROUTER" ]; then
+  OK "router present and executable"
+else
+  BAD "router missing or not executable: $ROUTER"
+fi
+
+# Where editors that bundle the Claude Code extension keep user settings.
+SETTINGS_CANDIDATES=(
+  "$HOME/.config/Code/User/settings.json"
+  "$HOME/.config/Code - Insiders/User/settings.json"
+  "$HOME/.config/VSCodium/User/settings.json"
+  "$HOME/.config/Cursor/User/settings.json"
+  "$HOME/Library/Application Support/Code/User/settings.json"
+)
+wired=0
+for s in "${SETTINGS_CANDIDATES[@]}"; do
+  [ -f "$s" ] || continue
+  value="$(CAR_S="$s" python3 -c "
+import json, os, re, sys
+raw = open(os.environ['CAR_S']).read()
+raw = re.sub(r'^\s*//.*$', '', raw, flags=re.M)
+try:
+    print(json.loads(raw).get('claudeCode.claudeProcessWrapper', ''))
+except Exception:
+    print('')
+" 2>/dev/null)"
+  [ -n "$value" ] || continue
+  wired=1
+  if [ "$(readlink -f "$value" 2>/dev/null)" = "$(readlink -f "$ROUTER" 2>/dev/null)" ]; then
+    OK "claudeCode.claudeProcessWrapper points at the router ($(basename "$(dirname "$(dirname "$s")")"))"
+  else
+    BAD "claudeCode.claudeProcessWrapper points at '$value', not $ROUTER"
+  fi
+done
+[ "$wired" -eq 1 ] || BAD "no editor has claudeCode.claudeProcessWrapper set; routing is not active in the GUI"
+
+# ─────────────────────────────────────────────────────── 2. configuration
+H "2. Configuration"
+if car_load_config; then
+  OK "config readable: $CAR_CONFIG_FILE"
+else
+  BAD "no config at $CAR_CONFIG_FILE (run: claude-account-router --init)"
+  printf '\nCannot continue without a config.\n'; exit 1
+fi
+
+profile_count=0
+while read -r p; do
+  profile_count=$((profile_count + 1))
+  dir="${CAR_PROFILE_DIR[$p]}"
+  if [ -d "$dir" ]; then
+    OK "profile '$p' -> $dir"
+  else
+    BAD "profile '$p' points at a missing dir: $dir"
+  fi
+done < <(car_profile_names)
+[ "$profile_count" -ge 2 ] || INFO "only one profile declared; nothing to separate yet"
+
+route_count=${#CAR_ROUTE_PATHS[@]}
+[ "$route_count" -gt 0 ] && OK "$route_count route(s) declared" \
+  || TODO "no routes declared; every folder would use profile '$CAR_DEFAULT_PROFILE'"
+
+# ─────────────────────────────────────────── 3. routing, by running the router
+H "3. Routing (running the router for real)"
+probe() {  # $1 = dir, $2 = expected profile name
+  local dir="$1" want="$2" got rc expect_dir
+  [ -d "$dir" ] || { INFO "$dir does not exist, skipped"; return; }
+  expect_dir="${CAR_PROFILE_DIR[$want]:-}"
+  # Do not use `printenv VAR`: it exits 1 when the variable is unset, which is
+  # indistinguishable from the router blocking. `sh -c` always exits 0, so the
+  # exit code reflects only the router's decision.
+  got="$(cd "$dir" && CLAUDE_ROUTER_ORIGIN=check "$ROUTER" \
+         /bin/sh -c 'printf "%s" "${CLAUDE_CONFIG_DIR-}"' 2>/dev/null)"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    BAD "$dir was BLOCKED (expected profile '$want'); run: claude-account"
+    return
+  fi
+  # The default dir runs with the variable unset, on purpose.
+  [ -z "$got" ] && got="$HOME/.claude"
+  if [ "$got" = "$expect_dir" ]; then
+    OK "$dir -> profile '$want'"
+  else
+    BAD "$dir -> $got, expected profile '$want' ($expect_dir)"
+  fi
+}
+
+for ((i = 0; i < route_count; i++)); do
+  probe "${CAR_ROUTE_PATHS[$i]}" "${CAR_ROUTE_PROFILES[$i]}"
+done
+
+# A folder that no route claims must land on the default profile.
+control=""
+for candidate in "$HOME" /tmp; do
+  [ "$(car_profile_for_dir "$candidate")" = "$CAR_DEFAULT_PROFILE" ] && { control="$candidate"; break; }
+done
+if [ -n "$control" ]; then
+  probe "$control" "$CAR_DEFAULT_PROFILE"
+else
+  INFO "every candidate control folder is routed; skipped the default-profile probe"
+fi
+
+# Worktrees of a routed repo must route the same way, wherever they live.
+wt_checked=0
+for ((i = 0; i < route_count; i++)); do
+  root="${CAR_ROUTE_PATHS[$i]}"
+  [ -d "$root" ] || continue
+  git -C "$root" rev-parse --git-dir >/dev/null 2>&1 || continue
+  while read -r wt; do
+    [ -n "$wt" ] || continue
+    [ "$wt" = "$root" ] && continue
+    case "$wt" in "$root"/*) continue ;; esac   # already covered by the path rule
+    probe "$wt" "${CAR_ROUTE_PROFILES[$i]}"
+    wt_checked=$((wt_checked + 1))
+  done < <(git -C "$root" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}')
+done
+[ "$wt_checked" -gt 0 ] && INFO "$wt_checked out-of-tree worktree(s) checked"
+
+# ─────────────────────────────────────────────────────── 4. account identity
+H "4. Account identity"
+while read -r p; do
+  dir="${CAR_PROFILE_DIR[$p]}"
+  glob="${CAR_PROFILE_GLOB[$p]:-}"
+  email="$(car_account_email "$dir")"
+  if ! car_has_session "$dir"; then
+    TODO "profile '$p' has no session; log in with: claude-account login $p"
+    continue
+  fi
+  foreign=""
+  while read -r other; do
+    [ "$other" = "$p" ] && continue
+    other_glob="${CAR_PROFILE_GLOB[$other]:-}"
+    [ -n "$other_glob" ] && [ "$other_glob" != '*' ] || continue
+    [ -n "$email" ] && car_glob_match "$email" "$other_glob" && { foreign="$other"; break; }
+  done < <(car_profile_names)
+
+  if [ -n "$foreign" ]; then
+    BAD "profile '$p' holds $email, which belongs to profile '$foreign'"
+  elif [ -z "$email" ]; then
+    BAD "profile '$p' has credentials but an unreadable email; the router will block it"
+  elif [ -n "$glob" ] && [ "$glob" != '*' ] && ! car_glob_match "$email" "$glob"; then
+    BAD "profile '$p' holds $email, which does not match $glob"
+  else
+    OK "profile '$p': $email"
+  fi
+done < <(car_profile_names)
+
+# ─────────────────────────────────────────────────────── 5. visual pilot
+H "5. Visual pilot (optional)"
+pilots=0
+for ((i = 0; i < route_count; i++)); do
+  dir="${CAR_ROUTE_PATHS[$i]}"
+  f="$dir/.vscode/settings.json"
+  [ -f "$f" ] || continue
+  grep -q "titleBar.activeBackground" "$f" 2>/dev/null || continue
+  pilots=$((pilots + 1))
+  if git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 \
+     && ! git -C "$dir" check-ignore -q "$f" 2>/dev/null; then
+    BAD "$(basename "$dir"): pilot present but NOT git-ignored; it would leak into the repo"
+  else
+    OK "$(basename "$dir"): title bar marked, not tracked by git"
+  fi
+done
+[ "$pilots" -eq 0 ] && INFO "no folder marks its title bar; see README for the snippet"
+
+# ───────────────────────────────────────────── 6. evidence of real editor use
+# Blocks 1 to 5 run the router directly. That does NOT prove the editor is using
+# it: if an extension update stopped honouring claudeProcessWrapper, everything
+# above would still pass while the routing silently died, and any visual marker
+# would be lying. The log is the evidence, because each editor-launched run
+# records origin=extension.
+H "6. Evidence of real editor use"
+if [ ! -f "$CAR_LOG_FILE" ]; then
+  TODO "no router log yet; open Claude in your editor and run this again"
+else
+  last="$(grep -F "origin=extension" "$CAR_LOG_FILE" 2>/dev/null | tail -1)"
+  if [ -z "$last" ]; then
+    # No editor-launched run on record. That is expected right after installing,
+    # and a real problem otherwise, and this command cannot tell the two apart
+    # on its own. So it asks for the one action that settles it instead of
+    # guessing, and stays out of the "all verified" state until it knows.
+    TODO "no editor-launched run on record yet.
+       Reload your editor window, open Claude, and run this again.
+       If it still says this afterwards, the wrapper is not being applied and
+       any visual marker is not trustworthy."
+  else
+    when="${last%% *}"
+    now="$(date +%s)"; then_ts="$(date -d "$when" +%s 2>/dev/null || echo "$now")"
+    hours=$(( (now - then_ts) / 3600 ))
+    detail="$(printf '%s' "$last" | sed 's/.*origin=extension :: //')"
+    if [ "$hours" -le 168 ]; then
+      OK "editor used the router ${hours}h ago -> $detail"
+    else
+      TODO "the editor last used the router $((hours / 24)) days ago.
+       If you have opened Claude since then, the wrapper stopped being applied
+       (extension update?) and any visual marker is no longer trustworthy."
+    fi
+  fi
+fi
+
+# ─────────────────────────────────────────────────────── summary
+printf '\n\033[1mSummary:\033[0m %d pass · %d todo · %d fail\n' "$ok" "$todo" "$bad"
+if [ "$bad" -gt 0 ]; then
+  printf 'Something would break the account separation. Review the FAIL lines.\n'
+  exit 1
+elif [ "$todo" -gt 0 ]; then
+  printf 'Setup is sound. The TODO lines need a login or an editor restart.\n'
+  exit 0
+else
+  printf 'Verified: every folder reaches its own account and the block works.\n'
+  exit 0
+fi

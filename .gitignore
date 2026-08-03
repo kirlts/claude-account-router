@@ -1,0 +1,11 @@
+# Nothing from a real installation belongs in this repository.
+# Config, credentials and logs live in ~/.config/claude-account-router/.
+routes.conf
+*.log
+backups/
+
+# Editor and OS noise
+.vscode/
+.idea/
+.DS_Store
+*.swp

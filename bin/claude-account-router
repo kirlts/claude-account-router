@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# claude-account-router: routes Claude Code to the right account based on the
+# folder you opened, and refuses to start when the active account does not match.
+#
+# The VS Code extension runs this through its claudeCode.claudeProcessWrapper
+# setting, which invokes it as:
+#
+#     claude-account-router <node> <cli.js> <args...>
+#
+# It sets CLAUDE_CONFIG_DIR for the matching profile, then execs the real command.
+#
+# Design: fail closed. If the router cannot prove the active account matches the
+# folder, it does not start Claude. It never falls back to another account
+# silently. That is what makes an editor-level indicator trustworthy, because a
+# running panel implies the account is the expected one.
+#
+# Config: ${XDG_CONFIG_HOME:-~/.config}/claude-account-router/routes.conf
+# Run with --init to create one.
+
+set -uo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+LIB="$(dirname "$(dirname "$SELF")")/lib/common.sh"
+
+# A missing library means the identity check cannot run. Blocking is the safe
+# outcome: better no Claude than Claude on an unverified account.
+if [ ! -f "$LIB" ]; then
+  printf '\n=== Claude Code: STARTUP BLOCKED ===\n' >&2
+  printf 'Cannot find the router library at: %s\n' "$LIB" >&2
+  printf 'Reinstall claude-account-router.\n\n' >&2
+  exit 1
+fi
+# shellcheck source=../lib/common.sh
+. "$LIB"
+
+die() {
+  printf '\n=== Claude Code: STARTUP BLOCKED ===\n%s\n\nFolder: %s\nLog:    %s\n\n' \
+    "$1" "$PWD" "$CAR_LOG_FILE" >&2
+  car_log "BLOCKED in $PWD :: $1"
+  exit 1
+}
+
+write_starter_config() {
+  mkdir -p "$CAR_CONFIG_HOME"
+  if [ -e "$CAR_CONFIG_FILE" ]; then
+    printf 'Config already exists: %s\n' "$CAR_CONFIG_FILE"
+    return 0
+  fi
+  cat >"$CAR_CONFIG_FILE" <<'EOF'
+# claude-account-router config.
+#
+#   profile <name> <config-dir> [expected-email-glob]
+#   route   <path> <profile>
+#
+# Folders not matched by any route fall back to the "default" profile, which is
+# ~/.claude unless declared otherwise. A route also covers every git worktree of
+# the same repository, wherever that worktree lives on disk.
+
+profile default ~/.claude
+# profile work  ~/.claude-work  *@example.com
+# route   ~/code/work-project   work
+EOF
+  printf 'Wrote %s\n' "$CAR_CONFIG_FILE"
+}
+
+main() {
+  car_load_config || die "No config file at $CAR_CONFIG_FILE
+Create one with: claude-account-router --init"
+
+  local profile dir glob email other other_glob
+  profile="$(car_profile_for_dir "$PWD")"
+  dir="${CAR_PROFILE_DIR[$profile]:-}"
+
+  [ -n "$dir" ] || die "A route points at profile '$profile', which is not declared in $CAR_CONFIG_FILE"
+  [ -d "$dir" ] || die "The config dir for profile '$profile' does not exist: $dir
+Without it Claude would silently use a different account."
+
+  glob="${CAR_PROFILE_GLOB[$profile]:-}"
+  email="$(car_account_email "$dir")"
+
+  if car_has_session "$dir"; then
+    # The account in this profile must be the one the profile claims.
+    if [ -n "$glob" ] && [ "$glob" != '*' ]; then
+      if [ -z "$email" ]; then
+        die "Profile '$profile' has credentials but its account email is unreadable.
+Cannot confirm it is the expected account, so Claude will not start."
+      elif ! car_glob_match "$email" "$glob"; then
+        die "This folder routes to profile '$profile', which expects an account matching: $glob
+The account logged in there is: $email
+Fix it with:  claude-account logout $profile   then log in with the right account."
+      fi
+    fi
+    # Leak check in the other direction: an account claimed by a different
+    # profile must not be used here, even when this profile declares no glob.
+    for other in "${!CAR_PROFILE_GLOB[@]}"; do
+      [ "$other" = "$profile" ] && continue
+      other_glob="${CAR_PROFILE_GLOB[$other]:-}"
+      [ -n "$other_glob" ] && [ "$other_glob" != '*' ] || continue
+      if [ -n "$email" ] && car_glob_match "$email" "$other_glob"; then
+        die "This folder routes to profile '$profile', but the account logged in there
+belongs to profile '$other': $email
+That account is meant for the folders routed to '$other'.
+Fix it with:  claude-account logout $profile   then log in with the right account."
+      fi
+    done
+  else
+    email="(no session: Claude will ask you to log in)"
+  fi
+
+  # The default config dir must run with the variable unset, the way Claude Code
+  # itself does. Exporting it changes the keychain service name Claude derives
+  # from the config dir, which would strand the existing session.
+  if [ "$dir" = "$HOME/.claude" ]; then
+    unset CLAUDE_CONFIG_DIR
+  else
+    export CLAUDE_CONFIG_DIR="$dir"
+  fi
+
+  # origin marks who invoked the router, so the checker can tell real editor use
+  # apart from its own probes.
+  car_log "$profile :: origin=${CLAUDE_ROUTER_ORIGIN:-extension} :: $PWD :: $dir :: $email"
+  exec "$@"
+}
+
+case "${1:-}" in
+  --init)    write_starter_config; exit 0 ;;
+  --version) printf 'claude-account-router %s\n' "$CAR_VERSION"; exit 0 ;;
+  --help|-h) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  '')
+    printf 'claude-account-router expects a command to run.\n' >&2
+    printf 'It wraps the Claude process; it is not meant to be run bare.\n' >&2
+    printf 'Try: claude-account-router --help\n' >&2
+    exit 64
+    ;;
+esac
+
+main "$@"

@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# claude-account: see and switch the Claude Code accounts this machine holds.
+#
+#   claude-account                  which account is in each profile
+#   claude-account check            full verification of the setup
+#   claude-account logout <profile> end the session in one profile
+#   claude-account login <profile>  start a session in one profile
+#   claude-account routes           which folders route where
+#
+# logout never deletes without a backup: credentials move into
+# <config-home>/backups/ with a timestamp, so any switch can be undone.
+
+set -uo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+ROOT="$(dirname "$(dirname "$SELF")")"
+LIB="$ROOT/lib/common.sh"
+
+[ -f "$LIB" ] || { printf 'Cannot find the library at %s\n' "$LIB" >&2; exit 1; }
+# shellcheck source=../lib/common.sh
+. "$LIB"
+
+CLAUDE_BIN="${CLAUDE_BIN:-$(command -v claude || true)}"
+BACKUPS="$CAR_CONFIG_HOME/backups"
+
+red()   { printf '\033[31m%s\033[0m\n' "$*"; }
+green() { printf '\033[32m%s\033[0m\n' "$*"; }
+dim()   { printf '\033[90m%s\033[0m\n' "$*"; }
+bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
+
+need_config() {
+  car_load_config && return 0
+  red "No config file at $CAR_CONFIG_FILE"
+  dim "Create one with: claude-account-router --init"
+  exit 1
+}
+
+# Does this email belong to a profile other than the one holding it?
+foreign_profile_for() {
+  local email="$1" own="$2" p glob
+  [ -n "$email" ] || return 1
+  for p in "${!CAR_PROFILE_GLOB[@]}"; do
+    [ "$p" = "$own" ] && continue
+    glob="${CAR_PROFILE_GLOB[$p]:-}"
+    [ -n "$glob" ] && [ "$glob" != '*' ] || continue
+    if car_glob_match "$email" "$glob"; then printf '%s' "$p"; return 0; fi
+  done
+  return 1
+}
+
+cmd_status() {
+  need_config
+  local p dir glob email foreign
+  while read -r p; do
+    dir="${CAR_PROFILE_DIR[$p]}"
+    glob="${CAR_PROFILE_GLOB[$p]:-}"
+    email="$(car_account_email "$dir")"
+    bold "profile ${p}  (${dir})"
+    if car_has_session "$dir"; then
+      if foreign="$(foreign_profile_for "$email" "$p")"; then
+        red "  ${email}   belongs to profile '${foreign}', not here"
+      elif [ -n "$glob" ] && [ "$glob" != '*' ] && [ -n "$email" ] \
+           && ! car_glob_match "$email" "$glob"; then
+        red "  ${email}   does not match ${glob}"
+      elif [ -z "$email" ]; then
+        printf '  session active, email unreadable\n'
+      else
+        green "  ${email}"
+      fi
+    else
+      dim "  no session"
+    fi
+  done < <(car_profile_names)
+  printf '\n'
+  dim "Routes:  claude-account routes"
+  dim "Full check:  claude-account check"
+}
+
+cmd_routes() {
+  need_config
+  local i n
+  n=${#CAR_ROUTE_PATHS[@]}
+  if [ "$n" -eq 0 ]; then
+    dim "No routes declared. Every folder uses profile '$CAR_DEFAULT_PROFILE'."
+    return
+  fi
+  bold "Folder routes (worktrees of the same repo included)"
+  for ((i = 0; i < n; i++)); do
+    printf '  %-45s -> %s\n' "${CAR_ROUTE_PATHS[$i]}" "${CAR_ROUTE_PROFILES[$i]}"
+  done
+  printf '  %-45s -> %s\n' "(anything else)" "$CAR_DEFAULT_PROFILE"
+}
+
+resolve_profile() {  # sets RESOLVED_DIR
+  local name="${1:-}"
+  if [ -z "$name" ]; then
+    red "Which profile? Declared: $(car_profile_names | tr '\n' ' ')"
+    return 1
+  fi
+  RESOLVED_DIR="${CAR_PROFILE_DIR[$name]:-}"
+  if [ -z "$RESOLVED_DIR" ]; then
+    red "No profile named '$name'. Declared: $(car_profile_names | tr '\n' ' ')"
+    return 1
+  fi
+  return 0
+}
+
+cmd_logout() {
+  need_config
+  local name="${1:-}" dir stamp identity reply
+  resolve_profile "$name" || return 1
+  dir="$RESOLVED_DIR"
+
+  if ! car_has_session "$dir"; then
+    dim "No session in profile '$name' ($dir). Nothing to end."
+    return 0
+  fi
+
+  printf 'About to end the session in profile %s (%s)\n' "$name" "$dir"
+  printf 'Account: %s\n' "$(car_account_email "$dir")"
+  printf 'Continue? [y/N] '
+  read -r reply
+  case "$reply" in y|Y|yes|YES) ;; *) dim "Cancelled."; return 0 ;; esac
+
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$BACKUPS"; chmod 700 "$BACKUPS"
+  mv "$dir/.credentials.json" "$BACKUPS/${name}-credentials-$stamp.json"
+  chmod 600 "$BACKUPS/${name}-credentials-$stamp.json"
+
+  # Drop the stored identity too, so nothing keeps claiming an account that is
+  # no longer logged in.
+  identity="$(car_identity_file "$dir")"
+  CAR_IDENTITY="$identity" CAR_BACKUP="$BACKUPS/${name}-identity-$stamp.json" python3 - <<'PY'
+import json, os, shutil
+p, bk = os.environ["CAR_IDENTITY"], os.environ["CAR_BACKUP"]
+if os.path.exists(p):
+    shutil.copy2(p, bk)
+    try:
+        with open(p) as f:
+            d = json.load(f)
+    except Exception:
+        raise SystemExit(0)
+    d.pop("oauthAccount", None); d.pop("userID", None)
+    with open(p, "w") as f:
+        json.dump(d, f, indent=2)
+    os.chmod(p, 0o600)
+PY
+  green "Session ended. Backup in $BACKUPS"
+  printf '\n'; cmd_status
+}
+
+cmd_login() {
+  need_config
+  local name="${1:-}" dir
+  resolve_profile "$name" || return 1
+  dir="$RESOLVED_DIR"
+
+  if car_has_session "$dir"; then
+    red "Profile '$name' already holds a session: $(car_account_email "$dir")"
+    dim "End it first:  claude-account logout $name"
+    return 1
+  fi
+  [ -n "$CLAUDE_BIN" ] || { red "Cannot find the 'claude' executable."; return 1; }
+  [ -d "$dir" ] || { mkdir -p "$dir" && chmod 700 "$dir"; }
+
+  bold "Logging in to profile '$name' ($dir)"
+  local glob="${CAR_PROFILE_GLOB[$name]:-}"
+  [ -n "$glob" ] && [ "$glob" != '*' ] && dim "Expected account: $glob"
+  dim "Claude will open. Type  /login  and follow the browser link."
+  dim "When done, type  /exit  and run:  claude-account"
+  printf '\n'
+
+  if [ "$dir" = "$HOME/.claude" ]; then
+    env -u CLAUDE_CONFIG_DIR "$CLAUDE_BIN"
+  else
+    CLAUDE_CONFIG_DIR="$dir" "$CLAUDE_BIN"
+  fi
+  printf '\n'; cmd_status
+}
+
+case "${1:-status}" in
+  status|'')      cmd_status ;;
+  routes)         cmd_routes ;;
+  check)          exec bash "$ROOT/bin/claude-account-check" ;;
+  logout)         cmd_logout "${2:-}" ;;
+  login)          cmd_login "${2:-}" ;;
+  --version)      printf 'claude-account %s\n' "$CAR_VERSION" ;;
+  --help|-h|help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *)
+    red "Unknown command '$1'."
+    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+    exit 1
+    ;;
+esac
