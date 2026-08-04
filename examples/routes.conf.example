@@ -2,28 +2,31 @@
 #
 # Two directives, one per line.
 #
-#   profile <name> <config-dir> [expected-email-glob]
+#   profile <name> <config-dir> [expected-email-glob] [title-bar-color]
 #   route   <path> <profile>
 #
 # profile
-#   name        how you refer to it in commands, for example: claude-account login work
-#   config-dir  where that account's credentials and settings live. Claude Code
-#               reads this through CLAUDE_CONFIG_DIR. The default profile must
-#               stay at ~/.claude, which is what Claude Code uses on its own.
-#   email-glob  optional. The account logged into this profile must match it, or
-#               the router refuses to start Claude. This is what turns the setup
-#               from a convention into a guarantee.
+#   name         how you refer to it in commands, for example: claude-account login work
+#   config-dir   where that account's credentials and settings live. Claude Code
+#                reads this through CLAUDE_CONFIG_DIR. The default profile must
+#                stay at ~/.claude, which is what Claude Code uses on its own.
+#   email-glob   optional. The account logged into this profile must match it, or
+#                the router refuses to start Claude. This is what turns the setup
+#                from a convention into a guarantee.
+#   title-bar-color  optional hex color used by `claude-account mark`. Requires
+#                the email-glob field to be present, since fields are positional.
 #
 # route
-#   Any folder at or below <path> uses <profile>. Every git worktree of the same
-#   repository routes the same way, wherever that worktree lives on disk.
+#   Any folder at or below <path> uses <profile>, including every subfolder, at
+#   any depth, and paths reached through a symlink. Every git worktree of the
+#   same repository routes the same way, wherever that worktree lives on disk.
 #   Folders no route claims fall back to the default profile.
 
 # The account you use everywhere else. Keep it on ~/.claude.
 profile default ~/.claude
 
-# A second account, restricted to one email domain.
-profile work ~/.claude-work *@example.com
+# A second account, restricted to one email domain, with a title bar color.
+profile work ~/.claude-work *@example.com #7c4a03
 
 # Folders that must use it.
 route ~/code/work-project   work

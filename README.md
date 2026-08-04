@@ -56,8 +56,10 @@ route ~/code/work-notes    work
 
 | Directive | Meaning |
 |---|---|
-| `profile <name> <config-dir> [email-glob]` | An account. `config-dir` is what Claude Code reads through `CLAUDE_CONFIG_DIR`. The optional glob is the account allowed to live there. |
-| `route <path> <profile>` | That path and everything under it uses the profile. Every git worktree of the same repository routes the same way. |
+| `profile <name> <config-dir> [email-glob] [color]` | An account. `config-dir` is what Claude Code reads through `CLAUDE_CONFIG_DIR`. The optional glob is the account allowed to live there. The optional hex color is used by `claude-account mark`. Fields are positional, so a color needs a glob before it. |
+| `route <path> <profile>` | That path and everything under it uses the profile: every subfolder, at any depth, and paths reached through a symlink. Every git worktree of the same repository routes the same way, wherever it lives. |
+
+One route per repository is enough. Opening `~/code/work-project/src/deep/folder` uses the work account without declaring anything else.
 
 Keep the `default` profile at `~/.claude`. Claude Code runs with the variable unset there, and the router preserves that, because the keychain service name is derived from the config dir and exporting it would strand your existing session.
 
@@ -96,21 +98,19 @@ Run it after every extension update. See "Known limits" for why.
 
 ## Mark the window
 
-The router decides the account. It cannot color the editor. To see at a glance that a folder is a work folder, put this in that folder's `.vscode/settings.json`:
+The router decides the account. It cannot color the editor. To see at a glance which account a window is on:
 
-```json
-{
-  "window.title": "WORK - ${rootName}${separator}${activeEditorShort}",
-  "workbench.colorCustomizations": {
-    "titleBar.activeBackground": "#7c4a03",
-    "titleBar.activeForeground": "#fff4e0",
-    "titleBar.inactiveBackground": "#4a2c02",
-    "titleBar.inactiveForeground": "#d8c4a8"
-  }
-}
+```bash
+claude-account mark          # marks the current folder
+claude-account mark <dir>    # marks another folder
+claude-account unmark        # removes it
 ```
 
-Add `.vscode/` to `.gitignore` or `.git/info/exclude` so it stays out of a shared repository. On Linux you may also need `"window.titleBarStyle": "custom"` for the color to apply.
+It colors the title bar with the profile's color and puts the profile name in the window title. It merges into an existing `.vscode/settings.json` instead of overwriting it, refuses to touch a file it cannot parse, and adds `.vscode/` to `.git/info/exclude` so a shared repository stays clean. `unmark` removes only the keys it added.
+
+**Markers do not inherit; routing does.** VS Code reads `.vscode/settings.json` from the folder you opened and never from a parent, so opening a subfolder of a marked repository gives you the right account with no color. That is a display gap, not a routing gap: run `claude-account mark` in the subfolders you open often. If a folder is routed but unmarked and you want to be sure, `claude-account` prints the accounts and `claude-account routes` prints where folders go.
+
+On Linux you may also need `"window.titleBarStyle": "custom"` for the color to apply.
 
 Be precise about what this marker claims. It says "this folder is declared as work", which is a static fact from your config. It does not measure the live session. The guarantee that the two agree comes from the router blocking a mismatch, not from the color.
 
@@ -123,6 +123,8 @@ Be precise about what this marker claims. It says "this folder is declared as wo
 | `claude-account check` | Full verification |
 | `claude-account login <profile>` | Start a session in one profile |
 | `claude-account logout <profile>` | End a session, keeping a timestamped backup |
+| `claude-account mark [dir]` | Color a folder's title bar for its profile |
+| `claude-account unmark [dir]` | Remove that marker |
 | `claude-account-router --init` | Write a starter config |
 
 `logout` never deletes without a backup. Credentials move to `~/.config/claude-account-router/backups/`.
@@ -143,7 +145,7 @@ Be precise about what this marker claims. It says "this folder is declared as wo
 ./tests/test-routing.sh
 ```
 
-Eleven end to end cases against a throwaway `HOME`: routing by path, by subfolder, by worktree outside the repo tree, fallback to default, and five fail closed paths (wrong account for a profile, an account leaking into the default profile, unreadable identity, missing config dir, missing config file). One case asserts that a profile with no session still starts, since otherwise the first login would be impossible.
+Seventeen end to end cases against a throwaway `HOME`: routing by path, by subfolder, by deeply nested subfolder, through a symlink, by worktree outside the repo tree, fallback to default, the marker commands including that they preserve pre-existing settings, and five fail closed paths (wrong account for a profile, an account leaking into the default profile, unreadable identity, missing config dir, missing config file). One case asserts that a profile with no session still starts, since otherwise the first login would be impossible.
 
 ## Documentation
 

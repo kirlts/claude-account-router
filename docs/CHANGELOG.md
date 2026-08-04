@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 *Nothing pending.*
 
+## [1.1.0] - 2026-08-03
+
+### Added
+- `claude-account mark` and `claude-account unmark`, writing the window marker for the profile that owns a folder. Needed because VS Code reads `.vscode/settings.json` only from the folder opened and never from a parent, so a marker cannot be inherited by subfolders the way routing is. Merges into an existing file, refuses to touch an unparseable one, and adds `.vscode/` to the repository's local exclude file.
+- Optional fourth field on `profile` for the title bar color used by `mark`.
+- Tests for deeply nested subfolders, folders reached through a symlink, and the marker commands including preservation of pre-existing settings. Seventeen cases total.
+
+### Changed
+- Path matching now compares canonical paths as well as literal ones, so a folder opened through a symlink resolves to its route instead of falling back to the default profile.
+
+### Fixed
+- Clarified in the README that routing already covers every subfolder at any depth. The missing color in a subfolder was a display gap being read as a routing failure.
+
 ## [1.0.0] - 2026-08-03
 
 ### Added

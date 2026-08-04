@@ -77,6 +77,45 @@ mkdir -p "$SANDBOX/code/work-project/src"
   && ok "unrouted non-git folder falls back to the default profile" \
   || no "unrouted non-git folder did not fall back"
 
+mkdir -p "$SANDBOX/code/work-project/a/b/c/d"
+[ "$(route_of "$SANDBOX/code/work-project/a/b/c/d")" = "$SANDBOX/.claude-work" ] \
+  && ok "deeply nested subfolder inherits the profile" \
+  || no "deeply nested subfolder did not inherit the profile"
+
+# A folder opened through a symlink keeps PWD as the symlink path, so a literal
+# prefix comparison misses it. The canonical comparison is what catches it.
+ln -sfn "$SANDBOX/code/work-project" "$SANDBOX/link-to-work"
+[ "$(route_of "$SANDBOX/link-to-work")" = "$SANDBOX/.claude-work" ] \
+  && ok "folder reached through a symlink still routes to its profile" \
+  || no "symlinked path escaped its route"
+
+head_ "Window marker (mark / unmark)"
+ACCOUNT_CMD="$ROOT/bin/claude-account"
+mkdir -p "$SANDBOX/code/work-project/.vscode"
+printf '{\n  "editor.tabSize": 7\n}\n' >"$SANDBOX/code/work-project/.vscode/settings.json"
+HOME="$SANDBOX" bash "$ACCOUNT_CMD" mark "$SANDBOX/code/work-project" >/dev/null 2>&1
+marked="$SANDBOX/code/work-project/.vscode/settings.json"
+if grep -q "titleBar.activeBackground" "$marked" 2>/dev/null; then
+  ok "mark writes the title bar color"
+else
+  no "mark did not write the title bar color"
+fi
+if grep -q '"editor.tabSize": 7' "$marked" 2>/dev/null; then
+  ok "mark preserves settings that were already there"
+else
+  no "mark clobbered pre-existing settings"
+fi
+HOME="$SANDBOX" bash "$ACCOUNT_CMD" unmark "$SANDBOX/code/work-project" >/dev/null 2>&1
+if ! grep -q "titleBar.activeBackground" "$marked" 2>/dev/null \
+   && grep -q '"editor.tabSize": 7' "$marked" 2>/dev/null; then
+  ok "unmark removes only the marker keys"
+else
+  no "unmark removed too much or too little"
+fi
+HOME="$SANDBOX" bash "$ACCOUNT_CMD" mark "$SANDBOX/code/personal-app" >/dev/null 2>&1
+[ $? -ne 0 ] && ok "mark refuses a folder on the default profile" \
+             || no "mark accepted a default-profile folder"
+
 head_ "Worktrees of a routed repository"
 git -C "$SANDBOX/code/work-project" worktree add -q -b wt "$SANDBOX/elsewhere/wt" 2>/dev/null
 if [ -d "$SANDBOX/elsewhere/wt" ]; then

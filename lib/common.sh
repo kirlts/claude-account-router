@@ -6,7 +6,7 @@
 # getting its path wrong makes the account check pass silently while checking
 # nothing.
 
-CAR_VERSION="1.0.0"
+CAR_VERSION="1.1.0"
 CAR_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/claude-account-router"
 CAR_CONFIG_FILE="${CLAUDE_ROUTER_CONFIG:-$CAR_CONFIG_HOME/routes.conf}"
 CAR_LOG_FILE="${CLAUDE_ROUTER_LOG:-$CAR_CONFIG_HOME/router.log}"
@@ -14,8 +14,13 @@ CAR_DEFAULT_PROFILE="default"
 
 declare -A CAR_PROFILE_DIR=()
 declare -A CAR_PROFILE_GLOB=()
+declare -A CAR_PROFILE_COLOR=()
 CAR_ROUTE_PATHS=()
 CAR_ROUTE_PROFILES=()
+
+# Default title bar color used by `claude-account mark` when a profile declares
+# none. Amber reads as "not your usual window" in both light and dark themes.
+CAR_DEFAULT_COLOR="#7c4a03"
 
 car_log() {
   mkdir -p "$(dirname "$CAR_LOG_FILE")" 2>/dev/null || true
@@ -33,14 +38,15 @@ car_expand_path() {
 # Populate CAR_PROFILE_* and CAR_ROUTE_*. Returns 1 when the config is missing.
 car_load_config() {
   [ -f "$CAR_CONFIG_FILE" ] || return 1
-  local kind a b c
-  while read -r kind a b c || [ -n "$kind" ]; do
+  local kind a b c d
+  while read -r kind a b c d || [ -n "$kind" ]; do
     case "$kind" in
       ''|'#'*) continue ;;
       profile)
         [ -n "${a:-}" ] && [ -n "${b:-}" ] || continue
         CAR_PROFILE_DIR["$a"]="$(car_expand_path "$b")"
         CAR_PROFILE_GLOB["$a"]="${c:-}"
+        CAR_PROFILE_COLOR["$a"]="${d:-}"
         ;;
       route)
         [ -n "${a:-}" ] && [ -n "${b:-}" ] || continue
@@ -63,14 +69,36 @@ car_git_common_dir() {
   readlink -f "$d" 2>/dev/null || printf '%s' "$d"
 }
 
+car_canonical() { readlink -f "$1" 2>/dev/null || printf '%s' "$1"; }
+
+# Is `dir` the route itself, or anywhere below it? Compared both literally and
+# canonically, so opening a folder through a symlink still matches its route.
+car_dir_under() {
+  local dir="$1" route="$2" dir_c route_c probe base
+  dir_c="$(car_canonical "$dir")"
+  route_c="$(car_canonical "$route")"
+  for probe in "$dir" "$dir_c"; do
+    for base in "$route" "$route_c"; do
+      [ -n "$probe" ] && [ -n "$base" ] || continue
+      [ "$probe" = "$base" ] && return 0
+      case "$probe" in "$base"/*) return 0 ;; esac
+    done
+  done
+  return 1
+}
+
 # Which profile owns a directory. Falls back to the default profile.
+#
+# Path prefix first, so every subfolder of a routed folder inherits its profile.
+# Then repository identity, which catches a worktree living outside the routed
+# path entirely.
 car_profile_for_dir() {
-  local dir="$1" i n route common route_common
+  local dir="$1" i n common route_common
   n=${#CAR_ROUTE_PATHS[@]}
   for ((i = 0; i < n; i++)); do
-    route="${CAR_ROUTE_PATHS[$i]}"
-    if [ "$dir" = "$route" ]; then printf '%s' "${CAR_ROUTE_PROFILES[$i]}"; return; fi
-    case "$dir" in "$route"/*) printf '%s' "${CAR_ROUTE_PROFILES[$i]}"; return ;; esac
+    if car_dir_under "$dir" "${CAR_ROUTE_PATHS[$i]}"; then
+      printf '%s' "${CAR_ROUTE_PROFILES[$i]}"; return
+    fi
   done
   common="$(car_git_common_dir "$dir")" || { printf '%s' "$CAR_DEFAULT_PROFILE"; return; }
   for ((i = 0; i < n; i++)); do

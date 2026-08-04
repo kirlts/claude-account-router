@@ -1,4 +1,4 @@
-# MASTER-SPEC: claude-account-router v1.0.0
+# MASTER-SPEC: claude-account-router v1.1.0
 
 > Routes Claude Code to a different account per folder in the VS Code extension, and refuses to start when the account does not match.
 
@@ -49,7 +49,7 @@ bin/claude-account-router  ---->  lib/common.sh  <----  bin/claude-account
 **Main Data Flow:**
 
 1. The extension launches the wrapper with the real Claude command as arguments, in the workspace folder.
-2. The wrapper loads `routes.conf` and resolves which profile owns the current directory, first by path prefix, then by comparing the git common dir so worktrees follow their repository.
+2. The wrapper loads `routes.conf` and resolves which profile owns the current directory, first by path prefix, compared both literally and canonically so that subfolders at any depth and paths reached through a symlink resolve to the same profile, then by comparing the git common dir so worktrees follow their repository.
 3. The wrapper reads the account email of that profile's config dir from the identity file Claude Code maintains.
 4. The wrapper blocks when the account contradicts the profile, in either direction: an account outside the profile's declared glob, or an account claimed by a different profile.
 5. The wrapper exports `CLAUDE_CONFIG_DIR` for non default profiles, unsets it for the default profile, appends a log line marking who invoked it, and execs the real command.
@@ -163,7 +163,10 @@ claude-account-router --version | --help
 
 ```
 claude-account [status] | routes | check | login <profile> | logout <profile>
+claude-account mark [dir] | unmark [dir]
 ```
+
+`mark` writes the window marker for the profile that owns a folder. It exists as a command rather than as documentation because VS Code reads `.vscode/settings.json` only from the folder opened, never from a parent, so a marker cannot be inherited by subfolders the way routing is. It merges into an existing file, refuses to touch one it cannot parse, and adds `.vscode/` to the repository's local exclude file.
 
 **Dependencies:** `lib/common.sh`, the `claude` executable for `login`.
 
