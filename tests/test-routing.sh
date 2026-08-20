@@ -116,6 +116,33 @@ HOME="$SANDBOX" bash "$ACCOUNT_CMD" mark "$SANDBOX/code/personal-app" >/dev/null
 [ $? -ne 0 ] && ok "mark refuses a folder on the default profile" \
              || no "mark accepted a default-profile folder"
 
+# Text color is derived from the background, so any profile color stays legible.
+# A fixed cream foreground was picked for an amber bar and looked wrong on blue.
+HOME="$SANDBOX" bash "$ACCOUNT_CMD" mark "$SANDBOX/code/work-project" >/dev/null 2>&1
+if grep -q '"titleBar.activeForeground": "#ffffff"' "$marked" 2>/dev/null; then
+  ok "dark profile color gets light title text"
+else
+  no "dark profile color did not get light title text"
+fi
+cat >"$CONF" <<EOF
+profile default $SANDBOX/.claude
+profile work    $SANDBOX/.claude-work  *@example.com  #e0f2fe
+route   $SANDBOX/code/work-project     work
+EOF
+rm -f "$marked"
+HOME="$SANDBOX" bash "$ACCOUNT_CMD" mark "$SANDBOX/code/work-project" >/dev/null 2>&1
+if grep -q '"titleBar.activeForeground": "#111111"' "$marked" 2>/dev/null; then
+  ok "light profile color gets dark title text"
+else
+  no "light profile color did not get dark title text"
+fi
+cat >"$CONF" <<EOF
+profile default $SANDBOX/.claude
+profile work    $SANDBOX/.claude-work  *@example.com
+route   $SANDBOX/code/work-project     work
+EOF
+rm -f "$marked"
+
 head_ "Worktrees of a routed repository"
 git -C "$SANDBOX/code/work-project" worktree add -q -b wt "$SANDBOX/elsewhere/wt" 2>/dev/null
 if [ -d "$SANDBOX/elsewhere/wt" ]; then
@@ -125,6 +152,35 @@ if [ -d "$SANDBOX/elsewhere/wt" ]; then
 else
   no "could not create a test worktree"
 fi
+
+head_ "A route on a subfolder must not claim its whole repository"
+# A common use: a narrower, temporary override for one subfolder of a repo that
+# already has a route. It must not make the repo's OTHER worktrees, or the repo
+# root itself, follow the subfolder's profile instead of the repo's own route.
+# Order matters: the router takes the FIRST matching route, so a narrower
+# exception has to sit above the broader route it carves out of.
+mkdir -p "$SANDBOX/code/work-project/inner"
+cat >"$CONF" <<EOF
+profile default $SANDBOX/.claude
+profile work    $SANDBOX/.claude-work  *@example.com
+route   $SANDBOX/code/work-project/inner  default
+route   $SANDBOX/code/work-project        work
+EOF
+[ "$(route_of "$SANDBOX/code/work-project/inner")" = "" ] \
+  && ok "the subfolder route itself uses its own profile" \
+  || no "the subfolder route did not use its own profile"
+[ "$(route_of "$SANDBOX/code/work-project")" = "$SANDBOX/.claude-work" ] \
+  && ok "the repository root still uses the repository's route, not the subfolder's" \
+  || no "the repository root was hijacked by the subfolder route"
+[ "$(route_of "$SANDBOX/elsewhere/wt")" = "$SANDBOX/.claude-work" ] \
+  && ok "an existing worktree still follows the repository's own route" \
+  || no "an existing worktree was hijacked by the subfolder route"
+# Restore the plain config so it does not leak into the tests below.
+cat >"$CONF" <<EOF
+profile default $SANDBOX/.claude
+profile work    $SANDBOX/.claude-work  *@example.com
+route   $SANDBOX/code/work-project     work
+EOF
 
 head_ "Fail closed: wrong account in a routed folder"
 printf '{"oauthAccount":{"emailAddress":"intruder@other.test"}}\n' \

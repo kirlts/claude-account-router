@@ -61,6 +61,15 @@ route ~/code/work-notes    work
 
 One route per repository is enough. Opening `~/code/work-project/src/deep/folder` uses the work account without declaring anything else.
 
+**Order matters: the first matching route wins.** To carve an exception out of a broader route, put the narrower path above it:
+
+```
+route ~/code/work-project/scratch  default    # exception, must come first
+route ~/code/work-project          work
+```
+
+A route on a subfolder routes that subfolder and everything under it, and deliberately does not claim its repository's identity, so the repository's own worktrees keep following the repository's route.
+
 Keep the `default` profile at `~/.claude`. Claude Code runs with the variable unset there, and the router preserves that, because the keychain service name is derived from the config dir and exporting it would strand your existing session.
 
 Folders no route claims use `default`.
@@ -106,13 +115,19 @@ claude-account mark <dir>    # marks another folder
 claude-account unmark        # removes it
 ```
 
-It colors the title bar with the profile's color and puts the profile name in the window title. It merges into an existing `.vscode/settings.json` instead of overwriting it, refuses to touch a file it cannot parse, and adds `.vscode/` to `.git/info/exclude` so a shared repository stays clean. `unmark` removes only the keys it added.
+It colors the title bar with the profile's color and puts the profile name in the window title. It merges into an existing `.vscode/settings.json` instead of overwriting it, refuses to touch a file it cannot parse, and adds `.vscode/` to `.git/info/exclude` so a shared repository stays clean. `unmark` removes only the keys it added. Text colors are derived from the profile color, so a light color gets dark text and a dark one gets light text.
+
+**The marker tracks the account, not a snapshot of the folder.** On every launch the router recomputes an existing marker against the profile it just resolved, and removes it when the folder now resolves to the default profile. So a marker cannot survive a routing change and keep claiming the old account: add a narrower route today and the color follows tomorrow, with no command to remember. Because the router only gets that far after the identity check passed, the profile it resolved and the live account are the same thing.
+
+It only touches files carrying its own signature, a `window.title` starting with `[` plus its color keys. A title bar you customized by hand is never rewritten, and never synced either.
 
 **Markers do not inherit; routing does.** VS Code reads `.vscode/settings.json` from the folder you opened and never from a parent, so opening a subfolder of a marked repository gives you the right account with no color. That is a display gap, not a routing gap: run `claude-account mark` in the subfolders you open often. If a folder is routed but unmarked and you want to be sure, `claude-account` prints the accounts and `claude-account routes` prints where folders go.
 
 On Linux you may also need `"window.titleBarStyle": "custom"` for the color to apply.
 
-Be precise about what this marker claims. It says "this folder is declared as work", which is a static fact from your config. It does not measure the live session. The guarantee that the two agree comes from the router blocking a mismatch, not from the color.
+Be precise about what this marker claims. A settings file cannot observe a session, so the color is not a live readout. What makes it trustworthy is the pair of mechanisms behind it: the router refuses to launch on a mismatched account, and it rewrites the marker to the profile it just resolved. So the color is never older than the last launch, and a launch never happens on the wrong account. Between those two, the window you are looking at is showing the account it is using.
+
+The gap that remains: a folder whose routing changed and that you have not opened since. Its marker is still describing the previous profile, and will correct itself the moment Claude starts there. `claude-account` reads the accounts directly if you want to know without opening anything.
 
 ## Commands
 
@@ -145,7 +160,7 @@ Be precise about what this marker claims. It says "this folder is declared as wo
 ./tests/test-routing.sh
 ```
 
-Seventeen end to end cases against a throwaway `HOME`: routing by path, by subfolder, by deeply nested subfolder, through a symlink, by worktree outside the repo tree, fallback to default, the marker commands including that they preserve pre-existing settings, and five fail closed paths (wrong account for a profile, an account leaking into the default profile, unreadable identity, missing config dir, missing config file). One case asserts that a profile with no session still starts, since otherwise the first login would be impossible.
+Twenty two end to end cases against a throwaway `HOME`: routing by path, by subfolder, by deeply nested subfolder, through a symlink, by worktree outside the repo tree, fallback to default, the marker commands including that they preserve pre-existing settings, and five fail closed paths (wrong account for a profile, an account leaking into the default profile, unreadable identity, missing config dir, missing config file). One case asserts that a profile with no session still starts, since otherwise the first login would be impossible.
 
 ## Documentation
 

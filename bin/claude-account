@@ -186,7 +186,7 @@ cmd_login() {
 # you actually open. That is what these two commands are for.
 cmd_mark() {
   need_config
-  local dir profile color label f
+  local dir profile color f
   dir="$(car_canonical "${1:-$PWD}")"
   [ -d "$dir" ] || { red "Not a directory: $dir"; return 1; }
 
@@ -196,52 +196,13 @@ cmd_mark() {
     dim "Markers exist to flag the folders that are NOT your usual account."
     return 1
   fi
+
+  # One implementation for the marker, shared with the router's sync. See
+  # car_write_marker in lib/common.sh.
+  car_write_marker "$dir" "$profile" create || return 1
+
   color="${CAR_PROFILE_COLOR[$profile]:-$CAR_DEFAULT_COLOR}"
-  label="$(printf '%s' "$profile" | tr '[:lower:]' '[:upper:]')"
   f="$dir/.vscode/settings.json"
-  mkdir -p "$dir/.vscode"
-
-  CAR_FILE="$f" CAR_COLOR="$color" CAR_LABEL="$label" python3 - <<'PY' || return 1
-import json, os, re, sys
-
-path, color, label = os.environ["CAR_FILE"], os.environ["CAR_COLOR"], os.environ["CAR_LABEL"]
-data, existed = {}, os.path.exists(path)
-if existed:
-    raw = open(path).read()
-    try:
-        data = json.loads(re.sub(r'^\s*//.*$', '', raw, flags=re.M) or "{}")
-    except Exception:
-        # Never clobber a file that cannot be parsed. The user's settings are
-        # worth more than the marker.
-        print("Existing .vscode/settings.json is not parseable; leaving it alone.", file=sys.stderr)
-        print("Add the marker by hand, or fix the file and rerun.", file=sys.stderr)
-        raise SystemExit(1)
-    if not isinstance(data, dict):
-        print("Existing .vscode/settings.json is not an object; leaving it alone.", file=sys.stderr)
-        raise SystemExit(1)
-
-data["window.title"] = "[%s] ${rootName}${separator}${activeEditorShort}" % label
-colors = data.get("workbench.colorCustomizations")
-if not isinstance(colors, dict):
-    colors = {}
-def darken(hexcolor, factor=0.6):
-    h = hexcolor.lstrip("#")
-    if len(h) != 6:
-        return hexcolor
-    return "#" + "".join("%02x" % int(int(h[i:i+2], 16) * factor) for i in (0, 2, 4))
-colors.update({
-    "titleBar.activeBackground": color,
-    "titleBar.activeForeground": "#fff4e0",
-    "titleBar.inactiveBackground": darken(color),
-    "titleBar.inactiveForeground": "#d8c4a8",
-})
-data["workbench.colorCustomizations"] = colors
-with open(path, "w") as fh:
-    json.dump(data, fh, indent=2)
-    fh.write("\n")
-print("updated" if existed else "created")
-PY
-
   green "Marked $dir as profile '$profile' ($color)"
 
   # Keep it out of a shared repository without editing tracked ignore files.
@@ -251,7 +212,7 @@ PY
     else
       local excl
       excl="$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)/info/exclude"
-      if [ -w "$(dirname "$excl")" ] 2>/dev/null || mkdir -p "$(dirname "$excl")" 2>/dev/null; then
+      if mkdir -p "$(dirname "$excl")" 2>/dev/null; then
         grep -qxF '.vscode/' "$excl" 2>/dev/null || printf '.vscode/\n' >>"$excl"
         dim "Added .vscode/ to $excl (local only, the repo is untouched)."
       else
@@ -264,40 +225,11 @@ PY
 
 cmd_unmark() {
   need_config
-  local dir f
+  local dir
   dir="$(car_canonical "${1:-$PWD}")"
-  f="$dir/.vscode/settings.json"
-  [ -f "$f" ] || { dim "No marker in $dir."; return 0; }
-
-  CAR_FILE="$f" python3 - <<'PY' || return 1
-import json, os, re, sys
-path = os.environ["CAR_FILE"]
-try:
-    data = json.loads(re.sub(r'^\s*//.*$', '', open(path).read(), flags=re.M) or "{}")
-except Exception:
-    print("Not parseable; leaving it alone.", file=sys.stderr)
-    raise SystemExit(1)
-title = data.get("window.title", "")
-if isinstance(title, str) and title.startswith("["):
-    data.pop("window.title", None)
-colors = data.get("workbench.colorCustomizations")
-if isinstance(colors, dict):
-    for k in ("titleBar.activeBackground", "titleBar.activeForeground",
-              "titleBar.inactiveBackground", "titleBar.inactiveForeground"):
-        colors.pop(k, None)
-    if colors:
-        data["workbench.colorCustomizations"] = colors
-    else:
-        data.pop("workbench.colorCustomizations", None)
-# Only remove the file when nothing of the user's own is left in it.
-if data:
-    with open(path, "w") as fh:
-        json.dump(data, fh, indent=2); fh.write("\n")
-    print("marker keys removed, your other settings kept")
-else:
-    os.remove(path)
-    print("file removed (it held only the marker)")
-PY
+  [ -f "$dir/.vscode/settings.json" ] || { dim "No marker in $dir."; return 0; }
+  # Passing the default profile is how the shared writer expresses removal.
+  car_write_marker "$dir" "$CAR_DEFAULT_PROFILE" sync || return 1
   green "Unmarked $dir"
 }
 

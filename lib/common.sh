@@ -6,7 +6,7 @@
 # getting its path wrong makes the account check pass silently while checking
 # nothing.
 
-CAR_VERSION="1.1.0"
+CAR_VERSION="1.2.0"
 CAR_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/claude-account-router"
 CAR_CONFIG_FILE="${CLAUDE_ROUTER_CONFIG:-$CAR_CONFIG_HOME/routes.conf}"
 CAR_LOG_FILE="${CLAUDE_ROUTER_LOG:-$CAR_CONFIG_HOME/router.log}"
@@ -69,6 +69,19 @@ car_git_common_dir() {
   readlink -f "$d" 2>/dev/null || printf '%s' "$d"
 }
 
+# Is `dir` the top level of its own git working tree, as opposed to a subfolder
+# inside a larger repository? A route on a subfolder still routes by path
+# prefix, but must NOT claim the whole repository's identity: doing so would
+# make every worktree of that repository match the subfolder's route instead
+# of the repository's own route, which is backwards from what a narrower,
+# more specific route is supposed to mean.
+car_is_repo_toplevel() {
+  local dir="$1" top
+  top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" || return 1
+  [ -n "$top" ] || return 1
+  [ "$(car_canonical "$dir")" = "$(car_canonical "$top")" ]
+}
+
 car_canonical() { readlink -f "$1" 2>/dev/null || printf '%s' "$1"; }
 
 # Is `dir` the route itself, or anywhere below it? Compared both literally and
@@ -102,6 +115,12 @@ car_profile_for_dir() {
   done
   common="$(car_git_common_dir "$dir")" || { printf '%s' "$CAR_DEFAULT_PROFILE"; return; }
   for ((i = 0; i < n; i++)); do
+    # Only a route that IS its repository's top level may claim the whole
+    # repository's identity for worktree matching. A route on a subfolder
+    # inside a larger repo shares that repo's common dir too, which would
+    # otherwise make every worktree of the repo match the narrower, more
+    # specific route instead of the repo's own route.
+    car_is_repo_toplevel "${CAR_ROUTE_PATHS[$i]}" || continue
     route_common="$(car_git_common_dir "${CAR_ROUTE_PATHS[$i]}")" || continue
     if [ "$common" = "$route_common" ]; then printf '%s' "${CAR_ROUTE_PROFILES[$i]}"; return; fi
   done
@@ -144,6 +163,160 @@ car_identity_file() {
 }
 
 car_has_session() { [ -s "$1/.credentials.json" ]; }
+
+# Write, update, or remove the window marker of a folder.
+#
+# One implementation for both callers, because they must agree on every byte:
+#   mode=create  `claude-account mark`. Creates or merges into the file.
+#   mode=sync    the router, on every launch. Only ever updates a marker that
+#                already exists, and removes it when the folder now resolves to
+#                the default profile.
+#
+# Why the router syncs at all: `mark` writes a static file. If routing later
+# changes for that folder, for example a narrower route exception, the color
+# stays behind describing the OLD profile while Claude launches under the NEW
+# one. That is the same class of mismatch this project exists to prevent, moved
+# from the account to the indicator claiming an account. Since the router only
+# reaches this point after the identity check passed, the profile it resolved
+# and the live account are the same thing, so syncing the marker against the
+# profile is syncing it against the account.
+#
+# It only ever touches a file carrying this project's marker signature: a
+# window.title starting with "[" plus at least one of our four color keys. A
+# hand made title bar customization is never clobbered.
+#
+# Text colors are derived from the background rather than fixed, so any profile
+# color stays legible. A fixed cream foreground was chosen for an amber bar and
+# looked dirty on a blue one.
+car_write_marker() {  # $1 = dir, $2 = profile name, $3 = create|sync
+  local dir="$1" profile="$2" mode="$3" f label color
+  f="$dir/.vscode/settings.json"
+
+  [ "$mode" = "sync" ] && [ ! -f "$f" ] && return 0
+
+  if [ "$profile" = "$CAR_DEFAULT_PROFILE" ]; then
+    label=""; color=""
+  else
+    label="$(printf '%s' "$profile" | tr '[:lower:]' '[:upper:]')"
+    color="${CAR_PROFILE_COLOR[$profile]:-$CAR_DEFAULT_COLOR}"
+    [ "$mode" = "create" ] && mkdir -p "$dir/.vscode"
+  fi
+
+  CAR_FILE="$f" CAR_LABEL="$label" CAR_COLOR="$color" CAR_MODE="$mode" python3 - <<'PY'
+import json, os, re, sys
+
+path = os.environ["CAR_FILE"]
+label, color, mode = os.environ["CAR_LABEL"], os.environ["CAR_COLOR"], os.environ["CAR_MODE"]
+quiet = mode == "sync"
+MARKER_KEYS = ("titleBar.activeBackground", "titleBar.activeForeground",
+               "titleBar.inactiveBackground", "titleBar.inactiveForeground")
+
+def bail(msg="", code=0):
+    if msg and not quiet:
+        print(msg, file=sys.stderr)
+    raise SystemExit(code)
+
+def channels(hexcolor):
+    h = hexcolor.lstrip("#")
+    if len(h) != 6:
+        return None
+    try:
+        return [int(h[i:i+2], 16) for i in (0, 2, 4)]
+    except ValueError:
+        return None
+
+def to_hex(ch):
+    return "#" + "".join("%02x" % max(0, min(255, int(round(c)))) for c in ch)
+
+def luminance(ch):
+    # Relative luminance, sRGB, per WCAG.
+    def lin(c):
+        c = c / 255
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = (lin(c) for c in ch)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+def scale(ch, factor):
+    return [c * factor for c in ch]
+
+def mix(a, b, t):
+    return [a[i] * t + b[i] * (1 - t) for i in range(3)]
+
+def marker_colors(color):
+    ch = channels(color)
+    if ch is None:
+        return None
+    fg = [255, 255, 255] if luminance(ch) < 0.45 else [17, 17, 17]
+    inactive_bg = scale(ch, 0.6)
+    return {
+        "titleBar.activeBackground": to_hex(ch),
+        "titleBar.activeForeground": to_hex(fg),
+        "titleBar.inactiveBackground": to_hex(inactive_bg),
+        # Attenuated toward its own bar instead of a fixed beige, so it reads as
+        # the same color family at any hue.
+        "titleBar.inactiveForeground": to_hex(mix(fg, inactive_bg, 0.62)),
+    }
+
+data, existed = {}, os.path.exists(path)
+if existed:
+    try:
+        data = json.loads(re.sub(r'^\s*//.*$', '', open(path).read(), flags=re.M) or "{}")
+    except Exception:
+        bail("Existing .vscode/settings.json is not parseable; leaving it alone.\n"
+             "Fix the file and rerun, or add the marker by hand.", 1)
+    if not isinstance(data, dict):
+        bail("Existing .vscode/settings.json is not an object; leaving it alone.", 1)
+
+title = data.get("window.title", "")
+colors = data.get("workbench.colorCustomizations")
+is_ours = (isinstance(title, str) and title.startswith("[")
+           and isinstance(colors, dict) and any(k in colors for k in MARKER_KEYS))
+
+if mode == "sync" and not is_ours:
+    bail()  # not our marker, or no marker at all
+
+if not isinstance(colors, dict):
+    colors = {}
+
+if not label:
+    # Folder now resolves to the default profile: a marker has no business
+    # surviving on a folder that is not, at this moment, another account.
+    if mode == "create":
+        bail("This folder routes to the default profile, so there is nothing to mark.", 1)
+    for k in MARKER_KEYS:
+        colors.pop(k, None)
+    if colors:
+        data["workbench.colorCustomizations"] = colors
+    else:
+        data.pop("workbench.colorCustomizations", None)
+    data.pop("window.title", None)
+else:
+    wanted = marker_colors(color)
+    if wanted is None:
+        bail("Profile color %r is not a 6 digit hex value." % color, 1)
+    new_title = "[%s] ${rootName}${separator}${activeEditorShort}" % label
+    if mode == "sync" and title == new_title and all(
+            colors.get(k) == v for k, v in wanted.items()):
+        bail()  # already correct, do not rewrite for nothing
+    data["window.title"] = new_title
+    colors.update(wanted)
+    data["workbench.colorCustomizations"] = colors
+
+if data:
+    with open(path, "w") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+    if not quiet:
+        print("updated" if existed else "created")
+elif os.path.exists(path):
+    os.remove(path)
+    if not quiet:
+        print("file removed (it held only the marker)")
+PY
+}
+
+# Kept as the router's entry point, so the call site reads as intent.
+car_sync_marker() { car_write_marker "$1" "$2" sync; }
 
 # Glob match usable inside a conditional, no subshell.
 car_glob_match() {

@@ -116,6 +116,12 @@ Fix it with:  claude-account logout $profile   then log in with the right accoun
     export CLAUDE_CONFIG_DIR="$dir"
   fi
 
+  # Keep an existing window marker truthful for THIS launch's resolved profile.
+  # A stale marker from before a routing change is exactly the failure this
+  # project exists to prevent, just relocated to the indicator instead of the
+  # account. See car_sync_marker for what it will and will not touch.
+  car_sync_marker "$PWD" "$profile"
+
   # origin marks who invoked the router, so the checker can tell real editor use
   # apart from its own probes.
   car_log "$profile :: origin=${CLAUDE_ROUTER_ORIGIN:-extension} :: $PWD :: $dir :: $email"

@@ -134,6 +134,13 @@ for ((i = 0; i < route_count; i++)); do
   root="${CAR_ROUTE_PATHS[$i]}"
   [ -d "$root" ] || continue
   git -C "$root" rev-parse --git-dir >/dev/null 2>&1 || continue
+  # A route on a subfolder inside a larger repository shares that repo's
+  # worktree list too. Listing worktrees for it would attribute the WHOLE
+  # repository's worktrees to the subfolder's profile, which is wrong: the
+  # router itself only lets a route claim repository-wide identity when the
+  # route path is the repository's own top level (see car_is_repo_toplevel).
+  # This mirrors that rule so the check does not flag correct behavior.
+  car_is_repo_toplevel "$root" || continue
   while read -r wt; do
     [ -n "$wt" ] || continue
     [ "$wt" = "$root" ] && continue
