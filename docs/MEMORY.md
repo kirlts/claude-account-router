@@ -106,3 +106,23 @@
 **Pattern:** Generated indicators are written at one moment and read at every later moment. Any change to the thing they describe silently turns them into false statements, and the more trusted the indicator, the more expensive the lie.
 **Lesson:** Have the mechanism recompute its own indicator as part of doing the work, not as a separate command someone must remember. Bind the recomputation to a point where the truth is already established, so the indicator cannot be more current than the check that justifies it or more stale than the last action. And recognize your own output by signature, so recomputation never overwrites something a person wrote by hand.
 **Source:** [Confirmed by user - no external source]
+
+---
+
+## [HEU-011] The state a migration must fix can be the state that hides the need to fix it
+
+**Date:** 2026-08-19
+**Origin:** A command that moves per-profile data out of a shared directory. Profiles shared it by symlink, so for every item the source directory and the destination directory resolved to the same path. The planner concluded everything was already correctly placed, planned nothing, and therefore never removed the symlink that caused the problem.
+**Pattern:** A migration usually asks "is this item where it belongs?" When the defect is an aliasing of locations rather than a misplacement within them, that question answers yes for every item, and the migration reports success having done nothing. Worse, the tests passed too, because reading through the symlink found the file at the destination path.
+**Lesson:** When writing a migration, name the defective state explicitly and resolve it before planning, rather than inferring the work item by item. Ask "is the container itself correct?" before "is the content in the right container?" And when a check passes, confirm it can also fail: a test that reads through the alias it is supposed to detect proves nothing.
+**Source:** [Confirmed by user - no external source]
+
+---
+
+## [HEU-012] For a permission boundary, absence of evidence is not evidence of the permissive side
+
+**Date:** 2026-08-19
+**Origin:** Classifying existing session history into per-account directories. Ownership came from a recorded working directory, and when that was unreadable the classifier fell back to the default account. That fallback moved history out of a restricted account and into the least restricted one, which is the precise leak the work was meant to close.
+**Pattern:** Classifiers need a fallback branch, and the natural choice is the most common or most general class. When the classification decides who may read the data, the general class is usually also the most permissive one, so the fallback quietly becomes a declassification rule.
+**Lesson:** When a classifier feeds a permission or isolation decision, give it a third answer: unknown. Let unknown mean "do nothing", leaving data where it is rather than relocating it on a guess. A migration that skips an ambiguous item is recoverable; one that declassifies it is not, because nobody sees it happen.
+**Source:** [Confirmed by user - no external source]

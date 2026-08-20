@@ -1,4 +1,4 @@
-# MASTER-SPEC: claude-account-router v1.2.0
+# MASTER-SPEC: claude-account-router v1.3.0
 
 > Routes Claude Code to a different account per folder in the VS Code extension, and refuses to start when the account does not match.
 
@@ -81,6 +81,8 @@ bin/claude-account-router  ---->  lib/common.sh  <----  bin/claude-account
 7. **The verifier checks effective state.** Asserting that files exist is not verification. Every claim it makes is produced by running the router or by reading real identity.
 8. **An indicator may not outlive the profile it describes.** The window marker is recomputed by the router on every launch against the profile actually resolved, and removed when that profile is the default one. A marker surviving a routing change would claim an account the session is not using, which is constraint 1's failure moved from the account to the indicator. The router only reaches the sync after the identity check passed, so the resolved profile and the live account are the same thing.
 9. **Marker writes touch only this project's own marker.** Recognition is by signature: a `window.title` beginning with `[` plus at least one of the four title bar color keys. A file without it is left alone in both directions, never rewritten and never synced, because a user's hand made customization outranks the marker.
+10. **Uncertain ownership never moves data toward a less restricted account.** When classifying existing memory or history, absence of evidence is not evidence of the default profile. A directory whose owner cannot be established stays where it is. Guessing wrong in the permissive direction leaks one account's history into another, which is the failure the isolation exists to prevent, so the guess is not taken.
+11. **Isolation never deletes, never overwrites.** Moving memory between profiles only moves. A destination that already holds a file of the same name is left untouched: a byte identical source copy is removed, and a differing one goes to quarantine under the router's own config home, out of the wrong account and out of Claude's way.
 
 ---
 
@@ -142,6 +144,10 @@ car_git_common_dir <dir>           -> absolute git common dir, or exit 1
 car_is_repo_toplevel <dir>         -> exit 0 when dir is its repo's top level
 car_write_marker <dir> <profile> create|sync  -> the window marker, one impl
 car_sync_marker <dir> <profile>    -> car_write_marker in sync mode
+car_projects_dir <profile>         -> where that profile keeps memory and history
+car_encoded_path <path>            -> path with slashes turned into dashes
+car_project_cwd <project-dir>      -> real folder, read from the session files
+car_profile_for_project <name> [cwd] -> owning profile, or exit 1 when unknown
 car_log <message>                  -> appends a timestamped line to the router log
 ```
 
@@ -170,7 +176,10 @@ claude-account-router --version | --help
 ```
 claude-account [status] | routes | check | login <profile> | logout <profile>
 claude-account mark [dir] | unmark [dir]
+claude-account isolate [--apply]
 ```
+
+`isolate` gives each profile its own per-project memory and session history. It exists because the natural way to build a second profile, symlinking the shared directories, silently shares memory and transcripts too, and because that sharing hides itself: while the link stands, every project looks correctly placed. Dry run by default.
 
 `mark` writes the window marker for the profile that owns a folder. It exists as a command rather than as documentation because VS Code reads `.vscode/settings.json` only from the folder opened, never from a parent, so a marker cannot be inherited by subfolders the way routing is. It merges into an existing file, refuses to touch one it cannot parse, and adds `.vscode/` to the repository's local exclude file.
 

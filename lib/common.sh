@@ -6,7 +6,7 @@
 # getting its path wrong makes the account check pass silently while checking
 # nothing.
 
-CAR_VERSION="1.2.0"
+CAR_VERSION="1.3.0"
 CAR_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/claude-account-router"
 CAR_CONFIG_FILE="${CLAUDE_ROUTER_CONFIG:-$CAR_CONFIG_HOME/routes.conf}"
 CAR_LOG_FILE="${CLAUDE_ROUTER_LOG:-$CAR_CONFIG_HOME/router.log}"
@@ -163,6 +163,73 @@ car_identity_file() {
 }
 
 car_has_session() { [ -s "$1/.credentials.json" ]; }
+
+# Where a profile keeps its per-project memory and session history.
+car_projects_dir() { printf '%s/projects' "${CAR_PROFILE_DIR[$1]}"; }
+
+# Claude Code names a project directory after its folder with every slash turned
+# into a dash. Used to classify history whose folder no longer exists.
+car_encoded_path() { printf '%s' "$1" | tr '/' '-'; }
+
+# The real folder a project directory belongs to, read from the cwd recorded
+# inside its session files.
+#
+# The directory name cannot be decoded reliably: slashes and literal dashes both
+# become dashes, so "-home-user-a-b" is ambiguous. The cwd field is unambiguous.
+car_project_cwd() {
+  local d="$1" f
+  for f in "$d"/*.jsonl; do
+    [ -f "$f" ] || continue
+    CAR_JSONL="$f" python3 - <<'PY' 2>/dev/null
+import json, os
+with open(os.environ["CAR_JSONL"], errors="ignore") as fh:
+    for i, line in enumerate(fh):
+        if i > 200:
+            break
+        try:
+            o = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(o, dict) and o.get("cwd"):
+            print(o["cwd"])
+            break
+PY
+    return 0
+  done
+  return 1
+}
+
+# Which profile owns a project directory, given its name and recorded cwd.
+#
+# A live folder resolves by route or repository. History from a deleted worktree
+# resolves by neither, yet it is still that account's history: agent scratchpads
+# are named /tmp/claude-<uid>/<encoded-origin>/..., so the origin folder's
+# encoded form sits inside the project directory's own name. Matching on that,
+# derived from the declared routes, keeps such history with the account that
+# produced it instead of letting it fall to the default profile.
+#
+# Returns 1 and prints nothing when there is no evidence either way. Callers
+# must leave such a directory where it is. Guessing "default" would be the
+# dangerous guess: it moves history OUT of a restricted account INTO the least
+# restricted one, which is the exact leak this command exists to close.
+car_profile_for_project() {
+  local name="$1" cwd="${2:-}" profile i n encoded
+  if [ -n "$cwd" ]; then
+    profile="$(car_profile_for_dir "$cwd")"
+    if [ "$profile" != "$CAR_DEFAULT_PROFILE" ]; then printf '%s' "$profile"; return 0; fi
+  fi
+  n=${#CAR_ROUTE_PATHS[@]}
+  for ((i = 0; i < n; i++)); do
+    encoded="$(car_encoded_path "${CAR_ROUTE_PATHS[$i]}")"
+    case "$name" in
+      "$encoded"|"$encoded"-*|*"-$encoded-"*|*"/$encoded-"*)
+        printf '%s' "${CAR_ROUTE_PROFILES[$i]}"; return 0 ;;
+    esac
+  done
+  # A readable cwd that matched no route really is the default profile's.
+  if [ -n "$cwd" ]; then printf '%s' "$CAR_DEFAULT_PROFILE"; return 0; fi
+  return 1
+}
 
 # Write, update, or remove the window marker of a folder.
 #

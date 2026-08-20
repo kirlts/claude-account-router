@@ -226,5 +226,78 @@ rm -f "$SANDBOX/.claude-work/.credentials.json"
   && ok "a profile with no session still starts, so you can log in" \
   || no "a profile with no session was blocked, making the first login impossible"
 
+head_ "Isolating memory and history per profile"
+# Shared projects dir, the situation a second profile starts in.
+rm -rf "$SANDBOX/.claude/projects" "$SANDBOX/.claude-work/projects"
+mkdir -p "$SANDBOX/.claude/projects"
+ln -sfn "$SANDBOX/.claude/projects" "$SANDBOX/.claude-work/projects"
+
+# A work project, identified by the cwd inside its session file.
+mkdir -p "$SANDBOX/.claude/projects/-work-encoded"
+printf '{"type":"user","cwd":"%s"}\n' "$SANDBOX/code/work-project" \
+  >"$SANDBOX/.claude/projects/-work-encoded/s1.jsonl"
+# A personal project.
+mkdir -p "$SANDBOX/.claude/projects/-personal-thing"
+printf '{"type":"user","cwd":"%s"}\n' "$SANDBOX/code/personal-app" \
+  >"$SANDBOX/.claude/projects/-personal-thing/s2.jsonl"
+# History of a deleted worktree: no cwd resolvable, but the encoded origin of a
+# routed repo sits inside its own name.
+enc="$(printf '%s' "$SANDBOX/code/work-project" | tr '/' '-')"
+mkdir -p "$SANDBOX/.claude/projects/-tmp-claude-1000-${enc}-abc-scratchpad-wt"
+printf '{"type":"mode"}\n' \
+  >"$SANDBOX/.claude/projects/-tmp-claude-1000-${enc}-abc-scratchpad-wt/s3.jsonl"
+
+HOME="$SANDBOX" bash "$ACCOUNT_CMD" isolate --apply >/dev/null 2>&1
+
+[ -f "$SANDBOX/.claude-work/projects/-work-encoded/s1.jsonl" ] \
+  && ok "a project resolved by recorded cwd moves to its profile" \
+  || no "a project resolved by recorded cwd did not move"
+
+[ -f "$SANDBOX/.claude/projects/-personal-thing/s2.jsonl" ] \
+  && ok "a personal project stays in the default profile" \
+  || no "a personal project was moved out of the default profile"
+
+[ -f "$SANDBOX/.claude-work/projects/-tmp-claude-1000-${enc}-abc-scratchpad-wt/s3.jsonl" ] \
+  && ok "history of a deleted worktree follows its repo's profile" \
+  || no "history of a deleted worktree fell to the default profile"
+
+[ -d "$SANDBOX/.claude-work/projects" ] && [ ! -L "$SANDBOX/.claude-work/projects" ] \
+  && ok "the shared projects symlink became a real directory" \
+  || no "the projects dir is still a symlink, so nothing was really isolated"
+
+out="$(HOME="$SANDBOX" bash "$ACCOUNT_CMD" isolate 2>&1)"
+case "$out" in
+  *"Nothing to move"*) ok "running it again reports nothing to do" ;;
+  *) no "not idempotent: a second run still wants to move something" ;;
+esac
+
+# A directory whose owner cannot be determined, no readable cwd and a name that
+# matches no route, must be left alone. Guessing "default" would move history
+# out of a restricted account into the least restricted one.
+mkdir -p "$SANDBOX/.claude-work/projects/-unknown-origin"
+printf 'not json\n' >"$SANDBOX/.claude-work/projects/-unknown-origin/x.jsonl"
+HOME="$SANDBOX" bash "$ACCOUNT_CMD" isolate --apply >/dev/null 2>&1
+[ -f "$SANDBOX/.claude-work/projects/-unknown-origin/x.jsonl" ] \
+  && ok "a project of undeterminable origin stays where it is" \
+  || no "a project of undeterminable origin was moved on a guess"
+
+# Conflict: the same session recorded on both sides with different content.
+# Nothing may be deleted or overwritten, and the wrong-account copy must go.
+mkdir -p "$SANDBOX/.claude/projects/-work-encoded"
+# Same cwd so it still classifies as work, different bytes so it is a genuine
+# conflict. An identical copy is a different case, handled by deleting it.
+printf '{"type":"user","cwd":"%s","stub":true}\n' "$SANDBOX/code/work-project" \
+  >"$SANDBOX/.claude/projects/-work-encoded/s1.jsonl"
+real_before="$(cat "$SANDBOX/.claude-work/projects/-work-encoded/s1.jsonl" 2>/dev/null)"
+HOME="$SANDBOX" bash "$ACCOUNT_CMD" isolate --apply >/dev/null 2>&1
+real_after="$(cat "$SANDBOX/.claude-work/projects/-work-encoded/s1.jsonl" 2>/dev/null)"
+if [ ! -e "$SANDBOX/.claude/projects/-work-encoded/s1.jsonl" ] \
+   && [ -f "$SANDBOX/.config/claude-account-router/orphaned/-work-encoded/s1.jsonl" ] \
+   && [ "$real_after" = "$real_before" ]; then
+  ok "a conflicting copy is quarantined without overwriting the real one"
+else
+  no "the conflicting copy was mishandled"
+fi
+
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

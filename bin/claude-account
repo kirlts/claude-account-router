@@ -8,6 +8,7 @@
 #   claude-account routes           which folders route where
 #   claude-account mark [dir]       color this folder's title bar for its profile
 #   claude-account unmark [dir]     remove that marker
+#   claude-account isolate [--apply] give each profile its own memory and history
 #
 # logout never deletes without a backup: credentials move into
 # <config-home>/backups/ with a timestamp, so any switch can be undone.
@@ -233,19 +234,142 @@ cmd_unmark() {
   green "Unmarked $dir"
 }
 
+# Per-project memory and session history live under <config-dir>/projects. When
+# a second profile is created by symlinking that directory, every account can
+# read every other account's memory and transcripts. This moves each project
+# directory into the profile that owns its folder.
+#
+# Prints the plan and changes nothing unless --apply is passed, because it moves
+# directories that can hold gigabytes of history.
+cmd_isolate() {
+  need_config
+  local apply=0 name cwd profile src dst target pdir p i moved=0 planned=0
+  [ "${1:-}" = "--apply" ] && apply=1
+
+  declare -A counts=()
+  local -a plan_src=() plan_dst=()
+  local shared=0
+
+  # A profile whose projects dir is a symlink to another one shares it entirely.
+  # This must be undone BEFORE planning: while the link stands, source and
+  # destination are literally the same directory, so every project looks like it
+  # already sits with its own account and nothing gets planned. The state to be
+  # fixed is the state that hides the need to fix it.
+  while read -r p; do
+    [ "$p" = "$CAR_DEFAULT_PROFILE" ] && continue
+    target="$(car_projects_dir "$p")"
+    [ -L "$target" ] || continue
+    shared=$((shared + 1))
+    if [ "$apply" -eq 1 ]; then
+      rm "$target"; mkdir -p "$target"; chmod 700 "$target"
+      dim "profile '$p' had a shared projects dir; it now has its own"
+    else
+      printf '  unshare  profile %-46s (its projects dir is a symlink)\n' "$p"
+    fi
+  done < <(car_profile_names)
+
+  while read -r p; do
+    pdir="$(car_projects_dir "$p")"
+    [ -e "$pdir" ] || continue
+    for src in "$pdir"/*/; do
+      [ -d "$src" ] || continue
+      src="${src%/}"
+      name="$(basename "$src")"
+      cwd="$(car_project_cwd "$src" || true)"
+      if ! profile="$(car_profile_for_project "$name" "$cwd")"; then
+        # No evidence of ownership. Leave it exactly where it is rather than
+        # risk moving one account's history into another's.
+        counts["unknown"]=$(( ${counts["unknown"]:-0} + 1 ))
+        continue
+      fi
+      counts["$profile"]=$(( ${counts["$profile"]:-0} + 1 ))
+      target="$(car_projects_dir "$profile")"
+      # Already in the right place? Compare canonically, since a shared dir
+      # reached through a symlink is the same directory.
+      [ "$(car_canonical "$(dirname "$src")")" = "$(car_canonical "$target")" ] && continue
+      plan_src+=("$src"); plan_dst+=("$target/$name")
+      planned=$((planned + 1))
+      printf '  move  %-56s -> %s\n' "$(printf '%.56s' "$name")" "$profile"
+    done
+  done < <(car_profile_names)
+
+  printf '\n'
+  bold "Project directories per profile"
+  for p in "${!counts[@]}"; do printf '  %-10s %s\n' "$p" "${counts[$p]}"; done
+  printf '\n'
+
+  if [ "$planned" -eq 0 ] && [ "$shared" -eq 0 ]; then
+    green "Nothing to move: every project already sits with its own account."
+    return 0
+  fi
+  if [ "$apply" -eq 0 ]; then
+    dim "$planned to move, $shared shared dir(s) to unshare."
+    dim "Run 'claude-account isolate --apply' to perform."
+    return 0
+  fi
+  # Every profile needs a real directory to receive its projects.
+  while read -r p; do
+    target="$(car_projects_dir "$p")"
+    mkdir -p "$target"; chmod 700 "$target"
+  done < <(car_profile_names)
+
+  local f merged
+  for i in "${!plan_src[@]}"; do
+    if [ ! -e "${plan_dst[$i]}" ]; then
+      mv "${plan_src[$i]}" "${plan_dst[$i]}" && moved=$((moved + 1))
+      continue
+    fi
+    # Both sides hold sessions for the same folder. That happens because the
+    # editor writes some session metadata without going through the router, so
+    # a stray directory reappears in the default profile. Skipping would leave
+    # those files in the wrong account, so merge: move every entry that is not
+    # already there, and never overwrite one that is.
+    merged=0
+    local quarantine base twin
+    quarantine="$CAR_CONFIG_HOME/orphaned/$(basename "${plan_dst[$i]}")"
+    for f in "${plan_src[$i]}"/* "${plan_src[$i]}"/.[!.]*; do
+      [ -e "$f" ] || continue
+      base="$(basename "$f")"
+      twin="${plan_dst[$i]}/$base"
+      if [ ! -e "$twin" ]; then
+        mv "$f" "${plan_dst[$i]}/" && merged=$((merged + 1))
+      elif cmp -s "$f" "$twin"; then
+        rm -f "$f"          # byte for byte identical, the copy adds nothing
+      else
+        # Same session recorded on both sides with different content, typically
+        # a metadata stub the editor wrote outside the router next to the real
+        # transcript. Nothing is deleted and nothing is overwritten: the stub
+        # goes to quarantine, out of the wrong account and out of Claude's way.
+        mkdir -p "$quarantine"; chmod 700 "$quarantine"
+        mv "$f" "$quarantine/$base" \
+          && dim "quarantined a conflicting copy of $base"
+      fi
+    done
+    if rmdir "${plan_src[$i]}" 2>/dev/null; then
+      dim "merged $merged entries into $(basename "${plan_dst[$i]}")"
+      moved=$((moved + 1))
+    else
+      dim "merged $merged entries; kept $(basename "${plan_src[$i]}"), it still holds files"
+    fi
+  done
+  green "Moved or merged $moved project directories."
+  dim "Reload any open editor window so it reads from the new location."
+}
+
 case "${1:-status}" in
   status|'')      cmd_status ;;
   routes)         cmd_routes ;;
+  isolate)        cmd_isolate "${2:-}" ;;
   mark)           cmd_mark "${2:-}" ;;
   unmark)         cmd_unmark "${2:-}" ;;
   check)          exec bash "$ROOT/bin/claude-account-check" ;;
   logout)         cmd_logout "${2:-}" ;;
   login)          cmd_login "${2:-}" ;;
   --version)      printf 'claude-account %s\n' "$CAR_VERSION" ;;
-  --help|-h|help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//' ;;
+  --help|-h|help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//' ;;
   *)
     red "Unknown command '$1'."
-    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
     ;;
 esac

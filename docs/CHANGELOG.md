@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 *Nothing pending.*
 
+## [1.3.0] - 2026-08-19
+
+### Added
+- `claude-account isolate`, which gives each profile its own per-project memory and session history. Creating a second profile by symlinking `projects/` leaves every account able to read every other account's memory and transcripts; this moves each project directory to the profile that owns its folder. Dry run by default, since it moves directories that can hold gigabytes.
+- Classification reads the real `cwd` recorded inside session files rather than decoding the directory name, which is ambiguous because both slashes and literal dashes become dashes.
+- History of deleted agent worktrees is classified by the encoded origin folder inside its own directory name, derived from the declared routes. Without this, transcripts produced by a work account fall to the default profile, since neither path nor git can resolve a folder that no longer exists.
+
+### Fixed
+- A project directory whose owner cannot be determined is now left where it is. It used to be classified as the default profile, which moved history OUT of a restricted account INTO the least restricted one: the exact leak the command exists to close.
+- Unsharing now happens before planning. While a profile's `projects/` was still a symlink to the default one, source and destination were the same directory, so every project looked correctly placed, nothing was planned, and the symlink was never removed. The state to be fixed was the state that hid the need to fix it.
+- A conflicting copy of the same session on both sides is quarantined under the router's own config home instead of being skipped or overwritten. Identical copies are removed. Nothing is deleted when it holds content the other side lacks.
+
 ## [1.2.0] - 2026-08-19
 
 ### Added

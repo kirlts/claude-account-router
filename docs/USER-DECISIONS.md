@@ -81,3 +81,19 @@
 - Hardcoded values became `routes.conf` directives, which required the profile and route model that did not exist in the first version.
 - The project needs its own tests, since it now runs on machines whose layout is unknown.
 **Reversion conditions:** None.
+
+---
+
+## [UD-006] Memory and history are isolated per account; access is not
+
+**Date:** 2026-08-19
+**Context:** With three accounts on one machine, the shared directories symlinked from the first profile turned out to include `projects/`: per-project memory and every session transcript. One account could read another's. Separately, the same audit found the work database connectors registered in the personal account, carrying embedded credentials.
+**Decision:** Isolate memory and session history per profile. Leave access shared. The user's own framing, translated: it does not bother them that the personal account can reach work things, because it is their work.
+**Discarded alternatives:**
+- Isolating the connectors as well. Attempted unprompted and reverted: the user owns both sides of that boundary, so the separation buys nothing and costs convenience.
+- Leaving history shared too. Rejected: transcripts accumulate without anyone deciding to keep them, and an account meant for one client should not carry another's.
+**Consequences:**
+- `claude-account isolate` exists, and by extension the whole question of classifying history whose folder no longer exists.
+- Isolation is bounded to data at rest that the tool itself created the conditions for. It is not a general confidentiality mechanism.
+- A residual leak stays documented rather than fixed: the editor writes some session metadata outside the router, so stubs appear in the default profile. They carry identifiers and generated titles, not transcripts.
+**Reversion conditions:** If a profile is ever handed to someone else, access sharing has to be revisited too, since the reasoning here rests on one person owning every account.

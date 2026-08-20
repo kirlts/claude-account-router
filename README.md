@@ -140,9 +140,29 @@ The gap that remains: a folder whose routing changed and that you have not opene
 | `claude-account logout <profile>` | End a session, keeping a timestamped backup |
 | `claude-account mark [dir]` | Color a folder's title bar for its profile |
 | `claude-account unmark [dir]` | Remove that marker |
+| `claude-account isolate [--apply]` | Give each profile its own memory and history |
 | `claude-account-router --init` | Write a starter config |
 
 `logout` never deletes without a backup. Credentials move to `~/.config/claude-account-router/backups/`.
+
+## Isolate memory and history
+
+Creating a second profile usually means symlinking the shared pieces of the first, and it is easy to include `projects/` without noticing. That directory holds per-project memory and every session transcript, so sharing it lets each account read the others'.
+
+```bash
+claude-account isolate            # shows the plan
+claude-account isolate --apply    # performs it
+```
+
+Each project directory moves to the profile that owns its folder. Ownership comes from the working directory recorded inside the session files, not from decoding the directory name, which is ambiguous because slashes and literal dashes both become dashes. History left behind by deleted agent worktrees is matched by the encoded origin folder inside its own name, since neither path nor git can resolve a folder that no longer exists.
+
+Three rules it follows, each learned the hard way:
+
+- **Nothing is deleted or overwritten.** If both profiles hold the same session, an identical copy is removed and a differing one goes to quarantine under `~/.config/claude-account-router/orphaned/`.
+- **Unknown ownership means untouched.** A directory whose owner cannot be established stays where it is. Defaulting it would move history out of a restricted account into the least restricted one.
+- **It unshares before planning.** While a profile's `projects/` is still a symlink, source and destination are the same directory and every project looks correctly placed, so nothing would ever be planned.
+
+Note the boundary: this isolates data at rest. MCP servers, skills and instructions are shared or separated by how you build each config dir, and the editor still writes a little session metadata outside the router, so stubs can appear in the default profile. Those carry identifiers and generated titles, not transcripts.
 
 ## Known limits
 
@@ -160,7 +180,7 @@ The gap that remains: a folder whose routing changed and that you have not opene
 ./tests/test-routing.sh
 ```
 
-Twenty two end to end cases against a throwaway `HOME`: routing by path, by subfolder, by deeply nested subfolder, through a symlink, by worktree outside the repo tree, fallback to default, the marker commands including that they preserve pre-existing settings, and five fail closed paths (wrong account for a profile, an account leaking into the default profile, unreadable identity, missing config dir, missing config file). One case asserts that a profile with no session still starts, since otherwise the first login would be impossible.
+Twenty nine end to end cases against a throwaway `HOME`: routing by path, by subfolder, by deeply nested subfolder, through a symlink, by worktree outside the repo tree, fallback to default, the marker commands including that they preserve pre-existing settings, and five fail closed paths (wrong account for a profile, an account leaking into the default profile, unreadable identity, missing config dir, missing config file). One case asserts that a profile with no session still starts, since otherwise the first login would be impossible.
 
 ## Documentation
 
