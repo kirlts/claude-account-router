@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 *Nothing pending.*
 
+## [1.4.0] - 2026-08-20
+
+### Fixed
+- Every routed folder's session history vanished from the editor's panel after 1.3.0. Isolation moved the transcripts into each profile, but the editor process never sees `CLAUDE_CONFIG_DIR`: it lists a folder's sessions from the default profile whatever account that folder uses. Four folders holding a hundred and twenty sessions read as empty. History is now named where the editor looks, pointing at the profile that owns it, so it belongs to the folder it was produced in rather than to the account that happened to produce it.
+- The residual leak documented in 1.3.0 is closed as a side effect. The session metadata the editor wrote outside the router used to land in the default profile as a stub next to the real transcript, which `isolate` then had to quarantine; it now lands in the same file the account owns.
+
+### Added
+- The router writes and updates that name on every launch, beside the window marker, so a folder opened for the first time has its history visible from its first session. It is removed when the folder returns to the default profile, and a link the user made by hand is never repointed.
+- `claude-account isolate` writes the missing names as part of its run and reports them separately from the moves, so history that is correctly placed but invisible is not reported as nothing to do.
+- Block 5 of the verifier: for every folder whose history is isolated, it counts the sessions the editor can reach and compares them against the sessions the owning profile holds.
+- `car_project_slug`, which reproduces Claude Code's own project directory name. Every non-alphanumeric character becomes a dash, not only slashes, so a path holding a dot or an underscore is named the way the editor will look for it.
+
 ## [1.3.0] - 2026-08-19
 
 ### Added

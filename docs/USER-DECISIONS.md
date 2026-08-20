@@ -97,3 +97,19 @@
 - Isolation is bounded to data at rest that the tool itself created the conditions for. It is not a general confidentiality mechanism.
 - A residual leak stays documented rather than fixed: the editor writes some session metadata outside the router, so stubs appear in the default profile. They carry identifiers and generated titles, not transcripts.
 **Reversion conditions:** If a profile is ever handed to someone else, access sharing has to be revisited too, since the reasoning here rests on one person owning every account.
+
+---
+
+## [UD-007] History belongs to the folder it was produced in, not to the account that produced it
+
+**Date:** 2026-08-20
+**Context:** The morning after memory and history were isolated per account, the editor's panel showed no past sessions for any routed folder. One folder had additionally changed hands: it used to run under the personal account and now routes to the work one, and the user wanted its existing conversations to count as the work account's and stay consultable like any other.
+**Decision:** Index history by folder. A folder's sessions are reachable from the editor whatever account produced them, and a folder that changes routing takes its history with it. The isolation of UD-006 stands: the bytes stay in the profile that owns the folder, and only a name in the default profile points at them.
+**Discarded alternatives:**
+- Returning to a single shared `projects/` directory for every profile. Rejected by the user when offered: it is simpler and it undoes UD-006, letting every account read every other account's memory and transcripts again.
+- Setting `CLAUDE_CONFIG_DIR` for the editor process itself. Not viable: the extension declares no setting for it, and one editor instance holds windows belonging to different accounts, so a single process environment cannot serve them.
+**Consequences:**
+- Isolation is now a property of storage only. Reachability follows the folder, which is also what the editor's own model assumes.
+- The name lives in the least restricted profile. This is defensible because a name is not the data and because the folder it names routes to the owning account, but it is the boundary of the guarantee and it is stated in MASTER-SPEC §5.
+- The residual leak of UD-006 closes: the metadata the editor writes outside the router now lands in the account's own file instead of appearing as a stub in the default profile.
+**Reversion conditions:** If a profile is ever handed to someone else, the names in the default profile have to go, and with them the panel's history for those folders.

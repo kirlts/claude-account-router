@@ -267,7 +267,7 @@ HOME="$SANDBOX" bash "$ACCOUNT_CMD" isolate --apply >/dev/null 2>&1
 
 out="$(HOME="$SANDBOX" bash "$ACCOUNT_CMD" isolate 2>&1)"
 case "$out" in
-  *"Nothing to move"*) ok "running it again reports nothing to do" ;;
+  *"Nothing to do"*) ok "running it again reports nothing to do" ;;
   *) no "not idempotent: a second run still wants to move something" ;;
 esac
 
@@ -298,6 +298,111 @@ if [ ! -e "$SANDBOX/.claude/projects/-work-encoded/s1.jsonl" ] \
 else
   no "the conflicting copy was mishandled"
 fi
+
+head_ "The editor's view of a folder's history"
+# The editor process never sees CLAUDE_CONFIG_DIR, so it looks for every
+# folder's sessions under the folder's own encoded name in the DEFAULT profile.
+# These cases assert that history stays reachable by folder while the bytes stay
+# in the account that produced them.
+
+# The same encoding Claude Code applies: every non-alphanumeric character, not
+# just slashes. Written out here on purpose, so the test fails if the
+# implementation ever loosens it.
+slug() { python3 -c 'import re,sys;sys.stdout.write(re.sub(r"[^a-zA-Z0-9]","-",sys.argv[1]))' "$1"; }
+
+work_slug="$(slug "$SANDBOX/code/work-project")"
+view="$SANDBOX/.claude/projects/$work_slug"
+
+[ -L "$view" ] && [ "$(readlink -f "$view")" = "$SANDBOX/.claude-work/projects/-work-encoded" ] \
+  && ok "isolate links a routed folder's history where the editor looks" \
+  || no "the routed folder's history is not reachable from the default profile"
+
+[ -f "$view/s1.jsonl" ] \
+  && ok "the session file is readable through the link" \
+  || no "the session file is not readable through the link"
+
+# The personal project already lives where the editor looks. A link would be a
+# second name for a directory reached directly.
+[ ! -L "$SANDBOX/.claude/projects/-personal-thing" ] \
+  && ok "a default-profile project gets no link" \
+  || no "a default-profile project was turned into a link"
+
+# History of a folder that no longer exists still belongs to its account, but no
+# editor window can ask for it by folder, so it gets no name in the way.
+[ ! -e "$SANDBOX/.claude/projects/$(slug "$SANDBOX/code/deleted-wt")" ] \
+  && ok "history of a deleted folder gets no view link" \
+  || no "a link was written for a folder that does not exist"
+
+# Running it again must see the links as links, not as projects to relocate. If
+# isolate moved one, it would land inside the profile it points at and then
+# point at itself.
+out="$(HOME="$SANDBOX" bash "$ACCOUNT_CMD" isolate 2>&1)"
+case "$out" in
+  *"Nothing to do"*) ok "a second run leaves the view links alone" ;;
+  *) no "not idempotent once the view links exist: $(printf '%s' "$out" | tr '\n' ' ')" ;;
+esac
+
+# A folder opened for the first time must get its link before it has history,
+# so its very first session shows up in the panel.
+mkdir -p "$SANDBOX/code/work-project/fresh"
+route_of "$SANDBOX/code/work-project/fresh" >/dev/null
+fresh_view="$SANDBOX/.claude/projects/$(slug "$SANDBOX/code/work-project/fresh")"
+[ -L "$fresh_view" ] \
+  && [ "$(readlink "$fresh_view")" = "$SANDBOX/.claude-work/projects/$(slug "$SANDBOX/code/work-project/fresh")" ] \
+  && ok "a launch links a folder that has no history yet" \
+  || no "a first launch left the folder's history unreachable"
+
+# Deliberately dangling: creating the target would litter each profile with
+# empty directories for folders where Claude was opened and never used.
+[ ! -e "$SANDBOX/.claude-work/projects/$(slug "$SANDBOX/code/work-project/fresh")" ] \
+  && ok "linking does not create an empty project directory" \
+  || no "linking created a project directory before Claude wrote anything"
+
+# Routing changed and the folder is back on the default profile: the link must
+# go, or the panel would show another account's history. Same rule as the window
+# marker, which may not outlive the profile it describes.
+CONF_NOROUTE="$CONF_DIR/routes-noroute.conf"
+cat >"$CONF_NOROUTE" <<EOF
+profile default $SANDBOX/.claude
+profile work    $SANDBOX/.claude-work  *@example.com
+EOF
+(cd "$SANDBOX/code/work-project/fresh" \
+   && HOME="$SANDBOX" CLAUDE_ROUTER_CONFIG="$CONF_NOROUTE" CLAUDE_ROUTER_ORIGIN=test \
+      "$ROUTER" /bin/true >/dev/null 2>&1)
+[ ! -e "$fresh_view" ] \
+  && ok "a folder back on the default profile loses its link" \
+  || no "a stale link survived a routing change"
+
+# A link a user made by hand points somewhere that is not a profile's project
+# directory. It is not ours; it is never repointed and never removed.
+foreign="$SANDBOX/.claude/projects/$(slug "$SANDBOX/code/work-project/fresh")"
+mkdir -p "$SANDBOX/elsewhere"
+ln -s "$SANDBOX/elsewhere" "$foreign"
+route_of "$SANDBOX/code/work-project/fresh" >/dev/null
+[ "$(readlink -f "$foreign")" = "$SANDBOX/elsewhere" ] \
+  && ok "a link that is not ours is left untouched" \
+  || no "a hand made link was clobbered"
+rm -f "$foreign"
+
+# A REAL directory where the link belongs means history for this folder exists
+# in the wrong account too. Resolving that means comparing and quarantining
+# files, which is isolate's job under --apply, never a launch's.
+mkdir -p "$foreign"
+printf '{"type":"mode"}\n' >"$foreign/stray.jsonl"
+route_of "$SANDBOX/code/work-project/fresh" >/dev/null
+[ -f "$foreign/stray.jsonl" ] && [ ! -L "$foreign" ] \
+  && ok "a launch does not touch real history sitting where the link belongs" \
+  || no "a launch moved or replaced real history"
+rm -rf "$foreign"
+
+# The encoding must match Claude Code's, which dashes every non-alphanumeric
+# character. A slash-only version would name the link wrong for any path holding
+# a dot or an underscore, and a symlink named with one dash too few points at
+# nothing.
+got="$(HOME="$SANDBOX" bash -c '. "'"$ROOT"'/lib/common.sh"; car_project_slug "/home/u/.claude/a_b"')"
+[ "$got" = "-home-u--claude-a-b" ] \
+  && ok "the slug dashes dots and underscores, not only slashes" \
+  || no "the slug encoding does not match Claude Code's: got '$got'"
 
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

@@ -6,7 +6,7 @@
 # getting its path wrong makes the account check pass silently while checking
 # nothing.
 
-CAR_VERSION="1.3.0"
+CAR_VERSION="1.4.0"
 CAR_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/claude-account-router"
 CAR_CONFIG_FILE="${CLAUDE_ROUTER_CONFIG:-$CAR_CONFIG_HOME/routes.conf}"
 CAR_LOG_FILE="${CLAUDE_ROUTER_LOG:-$CAR_CONFIG_HOME/router.log}"
@@ -170,6 +170,130 @@ car_projects_dir() { printf '%s/projects' "${CAR_PROFILE_DIR[$1]}"; }
 # Claude Code names a project directory after its folder with every slash turned
 # into a dash. Used to classify history whose folder no longer exists.
 car_encoded_path() { printf '%s' "$1" | tr '/' '-'; }
+
+# Longest project directory name Claude Code writes verbatim. Past it, it
+# truncates and appends a hash of the path, which car_project_slug does not
+# reproduce, so such a folder cannot be linked by name.
+CAR_SLUG_MAX=200
+
+# Claude Code's own name for a folder's project directory: EVERY character that
+# is not a letter or a digit becomes a dash, not only slashes. A dot counts too,
+# so "$HOME/.claude/x" is "-home-u--claude-x" with two dashes in the middle.
+# car_encoded_path is the looser form, used to recognise an encoded path sitting
+# inside a longer directory name; this one must match byte for byte, because a
+# symlink named with one dash too few points at nothing.
+car_project_slug() {
+  CAR_SLUG_PATH="$1" python3 -c 'import os,re,sys
+sys.stdout.write(re.sub(r"[^a-zA-Z0-9]", "-", os.environ["CAR_SLUG_PATH"]))' 2>/dev/null
+}
+
+# Where the EDITOR looks for a folder's session history.
+#
+# The wrapper sets CLAUDE_CONFIG_DIR on the Claude process it launches. The
+# editor process never sees it: it lists a folder's sessions from
+# ~/.claude/projects/<slug> whatever account that folder routes to. So isolating
+# history per profile makes the panel show none of it, which is how this was
+# found: four folders with a hundred sessions between them looked empty.
+#
+# The link closes that gap in the direction the user means. History belongs to
+# the FOLDER it was produced in, which is the only thing both sides agree on:
+# the editor knows the folder, the router knows which account the folder uses,
+# and the account is a property of the folder, not of the transcript. The bytes
+# stay in the profile that owns them; only a name in the default profile points
+# at them.
+car_history_view_path() {
+  printf '%s/%s' "$(car_projects_dir "$CAR_DEFAULT_PROFILE")" "$1"
+}
+
+# Recognition by signature, exactly like the window marker: a symlink whose
+# destination sits inside some profile's projects dir is ours. A link a user
+# made by hand to anywhere else is never removed and never repointed.
+car_is_history_view() {
+  local link="$1" dest p pdir
+  [ -L "$link" ] || return 1
+  dest="$(car_canonical "$link")"
+  [ -n "$dest" ] || return 1
+  while read -r p; do
+    pdir="$(car_canonical "$(car_projects_dir "$p")")"
+    [ -n "$pdir" ] || continue
+    case "$dest" in "$pdir"/*) return 0 ;; esac
+  done < <(car_profile_names)
+  return 1
+}
+
+# Make the editor's view of one folder's history point at the profile that owns
+# it. Prints what it did, or would do, in one word:
+#
+#   ok        already correct, nothing touched
+#   link      the link was missing
+#   relink    it pointed at another profile, so routing changed under it
+#   unlink    the folder is back on the default profile, the link must go
+#   occupied  a REAL directory sits where the link belongs
+#   foreign   a symlink that is not ours holds the name
+#
+# mode=plan prints and changes nothing; mode=apply performs it.
+#
+# It never moves, merges or deletes history. "occupied" is the case that looks
+# like it should: history for this folder exists in the wrong account too, and
+# resolving it means comparing and possibly quarantining files, which is
+# `claude-account isolate`, not something a launch may do behind the user.
+# $4 is the directory to point at, defaulting to the profile's project
+# directory of the same name. It exists because the link is named after the
+# folder as the EDITOR encodes it, while the directory it points at was named by
+# whichever Claude wrote it first; those are normally the same string, and when
+# they are not, the name the editor reads is the one that has to be right.
+car_link_history_view() {  # $1 = slug, $2 = profile, $3 = plan|apply, [$4 = target]
+  local slug="$1" profile="$2" mode="$3" view target
+  [ -n "$slug" ] || return 1
+  [ "${#slug}" -le "$CAR_SLUG_MAX" ] || { printf 'toolong'; return 1; }
+  view="$(car_history_view_path "$slug")"
+  target="${4:-$(car_projects_dir "$profile")/$slug}"
+
+  if [ "$profile" = "$CAR_DEFAULT_PROFILE" ]; then
+    # The folder's own history now lives in the default profile, so a link into
+    # another profile would send the panel to a different account's history.
+    # Same rule as the window marker: an indicator may not outlive the profile
+    # it describes.
+    car_is_history_view "$view" || { printf 'ok'; return 0; }
+    [ "$mode" = "apply" ] && rm -f "$view"
+    printf 'unlink'; return 0
+  fi
+
+  if [ -L "$view" ]; then
+    [ "$(car_canonical "$view")" = "$(car_canonical "$target")" ] && { printf 'ok'; return 0; }
+    car_is_history_view "$view" || { printf 'foreign'; return 1; }
+    [ "$mode" = "apply" ] && { rm -f "$view" && ln -s "$target" "$view"; }
+    printf 'relink'; return 0
+  fi
+  if [ -e "$view" ]; then printf 'occupied'; return 1; fi
+
+  if [ "$mode" = "apply" ]; then
+    mkdir -p "$(dirname "$view")" 2>/dev/null || { printf 'occupied'; return 1; }
+    chmod 700 "$(dirname "$view")" 2>/dev/null
+    # Deliberately allowed to dangle: the target appears the moment Claude first
+    # writes there. Creating it here would litter every profile with empty
+    # directories for folders where Claude was opened and never used.
+    ln -s "$target" "$view" 2>/dev/null || { printf 'occupied'; return 1; }
+  fi
+  printf 'link'; return 0
+}
+
+# The router's entry point, on every launch, next to the window marker: by the
+# time it runs, the identity check has passed, so the profile it resolved and
+# the live account are the same thing. A folder opened for the first time gets
+# its link before it has any history, so its first session is visible too.
+car_sync_history_view() {  # $1 = dir, $2 = profile
+  local slug state
+  slug="$(car_project_slug "$(car_canonical "$1")")" || return 0
+  [ -n "$slug" ] || return 0
+  state="$(car_link_history_view "$slug" "$2" apply)"
+  case "$state" in
+    ok) ;;
+    link|relink|unlink) car_log "history view $state :: $slug -> $2" ;;
+    *) car_log "history view $state :: $slug (left alone; run 'claude-account isolate')" ;;
+  esac
+  return 0
+}
 
 # The real folder a project directory belongs to, read from the cwd recorded
 # inside its session files.

@@ -1,4 +1,4 @@
-# VERIFICATION: claude-account-router v1.3.0
+# VERIFICATION: claude-account-router v1.4.0
 
 > Canonical truth for all formal promise verifications and testing boundaries.
 > Generated and maintained exclusively by the `/derive` algorithm.

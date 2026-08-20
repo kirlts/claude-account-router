@@ -248,7 +248,8 @@ cmd_isolate() {
 
   declare -A counts=()
   local -a plan_src=() plan_dst=()
-  local shared=0
+  local -a view_slug=() view_profile=() view_target=()
+  local shared=0 views=0 view_planned=0 view_skipped=0
 
   # A profile whose projects dir is a symlink to another one shares it entirely.
   # This must be undone BEFORE planning: while the link stands, source and
@@ -274,6 +275,11 @@ cmd_isolate() {
     for src in "$pdir"/*/; do
       [ -d "$src" ] || continue
       src="${src%/}"
+      # A history view link is not a misplaced project. It is the name the
+      # editor reads, and it deliberately lives in the default profile pointing
+      # elsewhere; moving it would carry it into the very profile it points at,
+      # and it would then point at itself.
+      if [ -L "$src" ]; then views=$((views + 1)); continue; fi
       name="$(basename "$src")"
       cwd="$(car_project_cwd "$src" || true)"
       if ! profile="$(car_profile_for_project "$name" "$cwd")"; then
@@ -283,6 +289,19 @@ cmd_isolate() {
         continue
       fi
       counts["$profile"]=$(( ${counts["$profile"]:-0} + 1 ))
+      # The editor looks for this folder's history under the folder's own
+      # encoded name in the default profile. Record the link it needs, unless
+      # the folder is gone: history of a deleted worktree still belongs to its
+      # account, but no editor window will ever ask for it by folder.
+      if [ "$profile" != "$CAR_DEFAULT_PROFILE" ]; then
+        if [ -n "$cwd" ] && [ -d "$cwd" ]; then
+          view_slug+=("$(car_project_slug "$(car_canonical "$cwd")")")
+          view_profile+=("$profile")
+          view_target+=("$(car_projects_dir "$profile")/$name")
+        else
+          view_skipped=$((view_skipped + 1))
+        fi
+      fi
       target="$(car_projects_dir "$profile")"
       # Already in the right place? Compare canonically, since a shared dir
       # reached through a symlink is the same directory.
@@ -293,17 +312,39 @@ cmd_isolate() {
     done
   done < <(car_profile_names)
 
+  # Where the editor will look for each folder's history. Evaluated before
+  # deciding there is nothing to do, because history can sit in exactly the
+  # right account and still be invisible in the panel, which is the failure
+  # that made this necessary.
+  local vi state
+  for vi in "${!view_slug[@]}"; do
+    state="$(car_link_history_view "${view_slug[$vi]}" "${view_profile[$vi]}" plan \
+             "${view_target[$vi]}")"
+    case "$state" in
+      ok) ;;
+      link|relink|unlink)
+        view_planned=$((view_planned + 1))
+        printf '  %-8s %-54s -> %s\n' "$state" \
+          "$(printf '%.54s' "${view_slug[$vi]}")" "${view_profile[$vi]}" ;;
+      *)
+        printf '  %-8s %-54s (left alone)\n' "$state" \
+          "$(printf '%.54s' "${view_slug[$vi]}")" ;;
+    esac
+  done
+
   printf '\n'
   bold "Project directories per profile"
   for p in "${!counts[@]}"; do printf '  %-10s %s\n' "$p" "${counts[$p]}"; done
   printf '\n'
 
-  if [ "$planned" -eq 0 ] && [ "$shared" -eq 0 ]; then
-    green "Nothing to move: every project already sits with its own account."
+  if [ "$planned" -eq 0 ] && [ "$shared" -eq 0 ] && [ "$view_planned" -eq 0 ]; then
+    green "Nothing to do: every project sits with its own account, and every folder's history is visible to the editor."
     return 0
   fi
   if [ "$apply" -eq 0 ]; then
-    dim "$planned to move, $shared shared dir(s) to unshare."
+    dim "$planned to move, $shared shared dir(s) to unshare, $view_planned view link(s) to write."
+    [ "$view_skipped" -gt 0 ] \
+      && dim "$view_skipped project(s) get no view link: their folder no longer exists."
     dim "Run 'claude-account isolate --apply' to perform."
     return 0
   fi
@@ -352,7 +393,18 @@ cmd_isolate() {
       dim "merged $merged entries; kept $(basename "${plan_src[$i]}"), it still holds files"
     fi
   done
-  green "Moved or merged $moved project directories."
+  # Last, once every project sits with its account: name each folder's history
+  # where the editor looks for it. A link written before the move would point at
+  # a directory that is about to leave.
+  local linked=0
+  for vi in "${!view_slug[@]}"; do
+    state="$(car_link_history_view "${view_slug[$vi]}" "${view_profile[$vi]}" apply \
+             "${view_target[$vi]}")"
+    case "$state" in link|relink|unlink) linked=$((linked + 1)) ;; esac
+  done
+  green "Moved or merged $moved project directories, wrote $linked history view link(s)."
+  [ "$view_skipped" -gt 0 ] \
+    && dim "$view_skipped project(s) got no link: their folder no longer exists."
   dim "Reload any open editor window so it reads from the new location."
 }
 

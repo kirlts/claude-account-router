@@ -126,3 +126,13 @@
 **Pattern:** Classifiers need a fallback branch, and the natural choice is the most common or most general class. When the classification decides who may read the data, the general class is usually also the most permissive one, so the fallback quietly becomes a declassification rule.
 **Lesson:** When a classifier feeds a permission or isolation decision, give it a third answer: unknown. Let unknown mean "do nothing", leaving data where it is rather than relocating it on a guess. A migration that skips an ambiguous item is recoverable; one that declassifies it is not, because nobody sees it happen.
 **Source:** [Confirmed by user - no external source]
+
+---
+
+## [HEU-013] Moving data is not finished until every process that READS it has been named
+
+**Date:** 2026-08-20
+**Origin:** Per-account isolation of Claude Code's session history. The transcripts were relocated correctly, by the one authority on ownership, with tests covering every case. The next morning the editor's panel showed no history at all for four folders holding a hundred and twenty sessions: the process that displays history is not the process that writes it, and only the writer had been given the new location.
+**Pattern:** A migration is planned around the component that owns the data, because that is the component being changed. Readers are invisible in that framing: they are not modified, they appear in no diff, and their configuration is not part of the work. When the reader resolves the location from an environment the migration does not control, it keeps reading the old place, and the failure surfaces as absence rather than as an error, which nothing alerts on.
+**Lesson:** Before moving data, enumerate the processes that read it and, for each, ask where it gets the location and who sets that. A reader whose location comes from an environment you do not set is a reader you have not migrated, whatever the tests say. Then check the consequence in the reader's own surface, not in the store: "the files are in the right directory" and "the app shows them" are different claims, and only the second is what the user meant.
+**Source:** [Confirmed by user - no external source]

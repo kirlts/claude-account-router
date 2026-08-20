@@ -140,7 +140,7 @@ The gap that remains: a folder whose routing changed and that you have not opene
 | `claude-account logout <profile>` | End a session, keeping a timestamped backup |
 | `claude-account mark [dir]` | Color a folder's title bar for its profile |
 | `claude-account unmark [dir]` | Remove that marker |
-| `claude-account isolate [--apply]` | Give each profile its own memory and history |
+| `claude-account isolate [--apply]` | Give each profile its own memory and history, and keep each folder's history visible |
 | `claude-account-router --init` | Write a starter config |
 
 `logout` never deletes without a backup. Credentials move to `~/.config/claude-account-router/backups/`.
@@ -162,11 +162,15 @@ Three rules it follows, each learned the hard way:
 - **Unknown ownership means untouched.** A directory whose owner cannot be established stays where it is. Defaulting it would move history out of a restricted account into the least restricted one.
 - **It unshares before planning.** While a profile's `projects/` is still a symlink, source and destination are the same directory and every project looks correctly placed, so nothing would ever be planned.
 
-Note the boundary: this isolates data at rest. MCP servers, skills and instructions are shared or separated by how you build each config dir, and the editor still writes a little session metadata outside the router, so stubs can appear in the default profile. Those carry identifiers and generated titles, not transcripts.
+It also keeps each folder's history visible in the editor, which isolation alone breaks. The editor process never sees `CLAUDE_CONFIG_DIR`: it lists a folder's past sessions from `~/.claude/projects` whatever account that folder routes to. So a symlink named for the folder lives there, pointing at the profile that owns it. History then belongs to the folder it was produced in, which is what the panel means by "this folder's sessions", while the transcripts stay in the account that produced them. The router keeps that link current on every launch, so a folder opened for the first time is covered too, and it is removed when a folder returns to the default profile.
+
+A project whose folder no longer exists gets no link. Its history still belongs to its account; no editor window can ask for it by folder.
+
+Note the boundary: this isolates data at rest, and the name that makes history reachable sits in the default profile. MCP servers, skills and instructions are shared or separated by how you build each config dir.
 
 ## Known limits
 
-**The wrapper is honored by the process, not by the login UI.** The router affects the Claude process the extension launches. The extension's own logout path does not go through it, so `Claude Code: Logout` from the panel can act on the default config dir rather than the profile you are in. Use `claude-account logout <profile>`, which names the directory explicitly.
+**The wrapper is honored by the process, not by the editor.** The router affects the Claude process the extension launches. The editor process itself runs outside it, which has two consequences. `Claude Code: Logout` from the panel can act on the default config dir rather than the profile you are in, so use `claude-account logout <profile>`, which names the directory explicitly. And the panel reads every folder's past sessions from the default config dir, which is why isolated history needs the link described above.
 
 **An extension update could stop honoring `claudeProcessWrapper`.** Then routing dies while a window marker stays on, which is the failure mode worth fearing. The router logs every launch with `origin=extension`, and `claude-account-check` reports when that evidence is missing or stale. That converts a silent failure into an observable one, and is the reason to run the check after updates.
 
@@ -180,7 +184,7 @@ Note the boundary: this isolates data at rest. MCP servers, skills and instructi
 ./tests/test-routing.sh
 ```
 
-Twenty nine end to end cases against a throwaway `HOME`: routing by path, by subfolder, by deeply nested subfolder, through a symlink, by worktree outside the repo tree, fallback to default, the marker commands including that they preserve pre-existing settings, and five fail closed paths (wrong account for a profile, an account leaking into the default profile, unreadable identity, missing config dir, missing config file). One case asserts that a profile with no session still starts, since otherwise the first login would be impossible.
+Forty end to end cases against a throwaway `HOME`: routing by path, by subfolder, by deeply nested subfolder, through a symlink, by worktree outside the repo tree, fallback to default, the marker commands including that they preserve pre-existing settings, the isolation of memory and history, the links that keep it visible by folder, and five fail closed paths (wrong account for a profile, an account leaking into the default profile, unreadable identity, missing config dir, missing config file). One case asserts that a profile with no session still starts, since otherwise the first login would be impossible.
 
 ## Documentation
 

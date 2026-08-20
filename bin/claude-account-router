@@ -122,6 +122,12 @@ Fix it with:  claude-account logout $profile   then log in with the right accoun
   # account. See car_sync_marker for what it will and will not touch.
   car_sync_marker "$PWD" "$profile"
 
+  # Keep this folder's history reachable from the panel. The editor process does
+  # not see CLAUDE_CONFIG_DIR, so it looks for every folder's sessions in the
+  # default profile; without this, isolating history per account hides it from
+  # the UI entirely. See car_sync_history_view.
+  car_sync_history_view "$PWD" "$profile"
+
   # origin marks who invoked the router, so the checker can tell real editor use
   # apart from its own probes.
   car_log "$profile :: origin=${CLAUDE_ROUTER_ORIGIN:-extension} :: $PWD :: $dir :: $email"

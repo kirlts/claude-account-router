@@ -1,4 +1,4 @@
-# MASTER-SPEC: claude-account-router v1.3.0
+# MASTER-SPEC: claude-account-router v1.4.0
 
 > Routes Claude Code to a different account per folder in the VS Code extension, and refuses to start when the account does not match.
 
@@ -83,6 +83,7 @@ bin/claude-account-router  ---->  lib/common.sh  <----  bin/claude-account
 9. **Marker writes touch only this project's own marker.** Recognition is by signature: a `window.title` beginning with `[` plus at least one of the four title bar color keys. A file without it is left alone in both directions, never rewritten and never synced, because a user's hand made customization outranks the marker.
 10. **Uncertain ownership never moves data toward a less restricted account.** When classifying existing memory or history, absence of evidence is not evidence of the default profile. A directory whose owner cannot be established stays where it is. Guessing wrong in the permissive direction leaks one account's history into another, which is the failure the isolation exists to prevent, so the guess is not taken.
 11. **Isolation never deletes, never overwrites.** Moving memory between profiles only moves. A destination that already holds a file of the same name is left untouched: a byte identical source copy is removed, and a differing one goes to quarantine under the router's own config home, out of the wrong account and out of Claude's way.
+12. **History is reachable by the folder it was produced in, whatever account produced it.** The editor process never sees `CLAUDE_CONFIG_DIR`; it lists every folder's sessions from the default profile's `projects/`. Isolating history per account therefore removes it from the panel unless the default profile carries a name pointing at the owning profile. That name is the folder as the editor encodes it, it follows the folder when routing changes, and it is removed when the folder returns to the default profile, which is constraint 8 applied to history instead of to the marker. It is a name and nothing else: writing it never moves, merges or deletes a byte, and a real directory already holding it is left for `isolate`, which is the only component allowed to touch user data.
 
 ---
 
@@ -96,6 +97,7 @@ bin/claude-account-router  ---->  lib/common.sh  <----  bin/claude-account
 | Blocking on an unreadable identity | Never running on an unverified account | Convenience when the format changes | If a future Claude Code version moves the identity field, this project stops working loudly instead of routing blindly. |
 | Symlinks over copies at install | Updates through `git pull` | Repository must stay in place | Moving or deleting the clone breaks the commands, which the missing library check reports clearly. |
 | Reading the account email | A verifiable identity check | Reading one field of a Claude Code internal file | Without an identity read there is no guarantee, only a convention. The field is not a secret and never leaves the machine. |
+| A symlink in the default profile instead of pointing the editor at the config dir | History visible by folder | A name for isolated data inside the least restricted profile | The extension declares no setting for its config dir, and its process environment is fixed when the window opens, so the only lever is the path it already reads. A name is not the data: the transcripts stay in the profile that owns them, and the folder the name refers to routes to that profile, so no session of another account is reading through it. |
 
 ---
 
@@ -146,6 +148,12 @@ car_write_marker <dir> <profile> create|sync  -> the window marker, one impl
 car_sync_marker <dir> <profile>    -> car_write_marker in sync mode
 car_projects_dir <profile>         -> where that profile keeps memory and history
 car_encoded_path <path>            -> path with slashes turned into dashes
+car_project_slug <path>            -> Claude Code's own name for that folder's project dir
+car_history_view_path <slug>       -> where the editor looks for that folder's history
+car_is_history_view <path>         -> exit 0 when a symlink is one this project wrote
+car_link_history_view <slug> <profile> plan|apply [target]
+                                   -> ok|link|relink|unlink|occupied|foreign|toolong
+car_sync_history_view <dir> <profile>  -> car_link_history_view in apply mode
 car_project_cwd <project-dir>      -> real folder, read from the session files
 car_profile_for_project <name> [cwd] -> owning profile, or exit 1 when unknown
 car_log <message>                  -> appends a timestamped line to the router log
@@ -181,13 +189,17 @@ claude-account isolate [--apply]
 
 `isolate` gives each profile its own per-project memory and session history. It exists because the natural way to build a second profile, symlinking the shared directories, silently shares memory and transcripts too, and because that sharing hides itself: while the link stands, every project looks correctly placed. Dry run by default.
 
+It also writes the name the editor reads for each folder's history, per constraint 12, and skips a project whose folder no longer exists: that history still belongs to its account, but no editor window can ask for it by folder, so a name for it would be a name for nothing. A view link found inside a `projects/` directory is never treated as a misplaced project, which would move it into the very profile it points at.
+
 `mark` writes the window marker for the profile that owns a folder. It exists as a command rather than as documentation because VS Code reads `.vscode/settings.json` only from the folder opened, never from a parent, so a marker cannot be inherited by subfolders the way routing is. It merges into an existing file, refuses to touch one it cannot parse, and adds `.vscode/` to the repository's local exclude file.
 
 **Dependencies:** `lib/common.sh`, the `claude` executable for `login`.
 
 ### 7.4. bin/claude-account-check
 
-**Purpose:** Verification. Six blocks: editor wiring, configuration, routing by running the router, account identity, the optional window marker, and evidence that the editor itself went through the router.
+**Purpose:** Verification. Seven blocks: editor wiring, configuration, routing by running the router, account identity, history reachable by folder, the optional window marker, and evidence that the editor itself went through the router.
+
+The history block counts the sessions visible through the name the editor reads and compares them against the sessions the owning profile holds. Asserting that the link exists would pass while it pointed at a profile the folder no longer uses.
 
 **Interface:**
 
