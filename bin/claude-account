@@ -208,6 +208,27 @@ cmd_mark() {
 
   # Keep it out of a shared repository without editing tracked ignore files.
   if git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
+    # A tracked marker is the one case where the ignore rule does nothing, so it comes first.
+    #
+    # Once the file is in the index, `check-ignore` reports nothing and `info/exclude` is not
+    # consulted at all. Two things follow, and the second is the one that wastes an afternoon:
+    # the marker travels with the repository, so whoever clones it inherits someone else's title
+    # bar; and it lives or dies by the branch, because checking out a branch that does not carry
+    # the file deletes it from disk. The bar disappears and nothing explains why.
+    #
+    # Found on 2026-08-30 in a repository where the marker had been committed since its first
+    # commit. Renaming the project folder is what exposed it: re-marking looked like it worked,
+    # and the next branch switch wiped it again.
+    if git -C "$dir" ls-files --error-unmatch "$f" >/dev/null 2>&1; then
+      if git -C "$dir" rm --cached -q "$f" 2>/dev/null; then
+        dim "The marker was tracked by git; removed from the index and left on disk."
+        dim "Commit that removal, or the next branch switch deletes the marker again."
+      else
+        red "The marker is tracked by git and could not be removed from the index."
+        red "Run: git -C $dir rm --cached .vscode/settings.json"
+        red "Until then it travels with the repository and a branch switch deletes it."
+      fi
+    fi
     if git -C "$dir" check-ignore -q "$f" 2>/dev/null; then
       dim "Already git-ignored."
     else

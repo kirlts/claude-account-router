@@ -123,6 +123,22 @@ It only touches files carrying its own signature, a `window.title` starting with
 
 **Markers do not inherit; routing does.** VS Code reads `.vscode/settings.json` from the folder you opened and never from a parent, so opening a subfolder of a marked repository gives you the right account with no color. That is a display gap, not a routing gap: run `claude-account mark` in the subfolders you open often. If a folder is routed but unmarked and you want to be sure, `claude-account` prints the accounts and `claude-account routes` prints where folders go.
 
+**If the marker is committed, it is not a marker: it is repository content.** Git does not consult
+`info/exclude` for a file that is already in the index, so adding the ignore rule changes nothing
+and two things follow. The marker ships to whoever clones the repository, who inherits your title
+bar and your profile name. And it lives or dies by the branch: checking out a branch that does not
+carry the file deletes it from disk, silently, and the bar disappears with no error to read.
+Re-marking looks like it worked until the next branch switch.
+
+`mark` now detects that case and takes the file out of the index, leaving it on disk. It tells you
+to commit that removal, because until you do, the deletion is still one checkout away.
+`claude-account-check` reports it as its own failure, separate from a merely un-ignored marker,
+and prints the command.
+
+This cost an afternoon on 2026-08-30, in a repository whose marker had been committed since its
+first commit. What surfaced it was renaming the project folder — the route stopped matching, and
+fixing the route did not bring the bar back, because by then a branch switch had removed the file.
+
 On Linux you may also need `"window.titleBarStyle": "custom"` for the color to apply.
 
 Be precise about what this marker claims. A settings file cannot observe a session, so the color is not a live readout. What makes it trustworthy is the pair of mechanisms behind it: the router refuses to launch on a mismatched account, and it rewrites the marker to the profile it just resolved. So the color is never older than the last launch, and a launch never happens on the wrong account. Between those two, the window you are looking at is showing the account it is using.
@@ -175,6 +191,12 @@ Note the boundary: this isolates data at rest, and the name that makes history r
 **An extension update could stop honoring `claudeProcessWrapper`.** Then routing dies while a window marker stays on, which is the failure mode worth fearing. The router logs every launch with `origin=extension`, and `claude-account-check` reports when that evidence is missing or stale. That converts a silent failure into an observable one, and is the reason to run the check after updates.
 
 **Verification depends on a readable account email.** The router reads `oauthAccount.emailAddress` from the config dir's identity file. If a future version stores identity elsewhere, the check cannot confirm the account, and the router blocks instead of guessing.
+
+**Renaming a routed folder breaks its route, and the symptom is a grey bar.** Routes match by path,
+so a renamed project stops matching and falls through to the default profile: no colour, and the
+wrong account. `claude-account routes` shows a route pointing at a path that no longer exists.
+Editing the route in `routes.conf` is half the fix; the other half is `claude-account mark` on the
+new path, because the marker lives inside the folder that changed name.
 
 **Tested on Linux with the VS Code extension.** The mechanism is a documented extension setting plus an environment variable, so other editors that bundle the extension should work. macOS keychain storage is not covered by the tests.
 

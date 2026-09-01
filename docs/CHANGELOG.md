@@ -7,7 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-*Nothing pending.*
+### Fixed
+
+- A window marker already tracked by git is taken out of the index by `mark`, and left on disk.
+  Git does not consult `info/exclude` for a file in the index, so the ignore rule the tool was
+  adding changed nothing: the marker shipped to whoever cloned the repository, and any branch
+  that did not carry the file deleted it from disk on checkout. The bar disappeared with no error
+  to read, and re-marking held only until the next branch switch.
+- `claude-account-check` reports a tracked marker as its own failure, separate from a merely
+  un-ignored one, and prints the command that fixes it. The two states had the same message and
+  only one of them was solvable by re-marking.
+
+### Documentation
+
+- The marker section explains what a committed marker is and why re-marking does not hold.
+- Known limits gains the case that surfaced this: renaming a routed folder breaks its route by
+  path, and fixing the route is only half the repair — the marker lives inside the folder that
+  changed name.
+
+### Tests
+
+- Four checks over a repository whose marker was committed, the shape of the real case: `mark`
+  untracks it, leaves it on disk, keeps its colour, and the check stops reporting it afterwards.
 
 ## [1.4.0] - 2026-08-20
 

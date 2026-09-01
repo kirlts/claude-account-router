@@ -404,5 +404,48 @@ got="$(HOME="$SANDBOX" bash -c '. "'"$ROOT"'/lib/common.sh"; car_project_slug "/
   && ok "the slug dashes dots and underscores, not only slashes" \
   || no "the slug encoding does not match Claude Code's: got '$got'"
 
+
+# ── A marker that git already tracks ────────────────────────────────────────
+#
+# The one case where adding the ignore rule changes nothing: git does not consult
+# info/exclude for a file that is in the index. So the marker travels with the repository, and
+# any branch that does not carry the file deletes it from disk on checkout. What the user brings
+# is «the title bar disappeared», never «git removed a file», and re-marking looks like it worked
+# until the next branch switch.
+#
+# Cost an afternoon on 2026-08-30, in a repository where the marker had been committed since its
+# first commit. Renaming the project folder is what surfaced it.
+tracked="$SANDBOX/repo-con-marca-rastreada"
+mkdir -p "$tracked/.vscode"
+git -C "$tracked" init -q
+git -C "$tracked" config user.email t@t
+git -C "$tracked" config user.name t
+printf '{ "workbench.colorCustomizations": { "titleBar.activeBackground": "#0284c7" } }\n' \
+  > "$tracked/.vscode/settings.json"
+git -C "$tracked" add -A >/dev/null 2>&1
+git -C "$tracked" commit -qm "marker committed, as it happened for real" >/dev/null 2>&1
+
+conf="$SANDBOX/rutas-marca.conf"
+printf 'profile default ~/.claude\nprofile otra    ~/.claude-otra  alguien@ejemplo.cl  #0284c7\nroute %s otra\n' \
+  "$tracked" > "$conf"
+
+CLAUDE_ROUTER_CONFIG="$conf" "$ROOT/bin/claude-account" mark "$tracked" >/dev/null 2>&1
+
+git -C "$tracked" ls-files --error-unmatch .vscode/settings.json >/dev/null 2>&1 \
+  && no "mark left the marker tracked by git; a branch switch will delete it" \
+  || ok "mark takes a tracked marker out of the index"
+
+[ -s "$tracked/.vscode/settings.json" ] \
+  && ok "and leaves it on disk, where the editor reads it" \
+  || no "mark removed the marker from disk instead of just untracking it"
+
+grep -q "titleBar.activeBackground" "$tracked/.vscode/settings.json" 2>/dev/null \
+  && ok "with its colour intact" \
+  || no "the marker lost its colour"
+
+CLAUDE_ROUTER_CONFIG="$conf" "$ROOT/bin/claude-account-check" 2>&1 | grep -q "TRACKED by git" \
+  && no "check still reports a tracked marker after mark fixed it" \
+  || ok "check stops reporting it once the marker is out of the index"
+
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

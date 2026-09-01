@@ -233,8 +233,17 @@ for ((i = 0; i < route_count; i++)); do
   grep -q "titleBar.activeBackground" "$f" 2>/dev/null || continue
   pilots=$((pilots + 1))
   if git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 \
+     && git -C "$dir" ls-files --error-unmatch "$f" >/dev/null 2>&1; then
+    # Tracked is worse than merely un-ignored, and it deserves its own line: the ignore rule is
+    # not consulted for a file in the index, so the marker both travels with the repository and
+    # gets deleted from disk by any branch that does not carry it. That deletion is silent, and
+    # the symptom people bring is «the bar disappeared», never «git removed a file».
+    BAD "$(basename "$dir"): pilot is TRACKED by git; a branch switch deletes it and it ships to whoever clones"
+    INFO "  fix: git -C $dir rm --cached .vscode/settings.json && git -C $dir commit -m 'untrack editor marker'"
+  elif git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 \
      && ! git -C "$dir" check-ignore -q "$f" 2>/dev/null; then
     BAD "$(basename "$dir"): pilot present but NOT git-ignored; it would leak into the repo"
+    INFO "  fix: claude-account mark $dir"
   else
     OK "$(basename "$dir"): title bar marked, not tracked by git"
   fi
