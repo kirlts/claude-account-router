@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+"""claude-account-hooks: a repository's hooks follow the work, not the folder the session opened.
+
+Claude Code loads a project's `.claude/settings.json` hooks only when the session is opened in that
+project. A session opened somewhere else (another repository, your home folder, a relief session on
+another account taking over when the first one ran out of quota) edits files of a repository whose
+guards never run. Hooks exist precisely so that nothing depends on the model remembering to run them.
+
+Registered once as a hook in each profile's settings, this runs the hooks of every repository the
+session is working on, as if the session had been opened there:
+
+  * A tool call that touches a declared repository (a file path inside it, the call's cwd, or a
+    `cd`/`git -C` into it in a Bash command) runs that repository's hooks for that call.
+  * A session that wrote into a repository, or ran a command from inside it, is marked as working
+    there, and from then on every event of the session (prompts, session start, stop, every tool
+    call) also runs that repository's hooks. Reading a file does not mark.
+  * A block (exit 2, or a JSON deny/block decision) is passed through unchanged. Context that the
+    hooks add is merged into one answer.
+  * Nothing runs for the repository the session was opened in: Claude Code already runs those.
+
+Only repositories claimed by a `route` in routes.conf are trusted. A repository you never declared
+never gets its hooks executed just because a session looked at it.
+
+  claude-account-hooks run                   the hook itself (reads the event on stdin)
+  claude-account-hooks install [--replace C] register it in every profile's settings.json;
+                                             --replace removes hook entries whose command is C
+  claude-account-hooks check                 exit 0 if every profile has it registered
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+HOME = os.path.expanduser("~")
+CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config")),
+                      "claude-account-router", "routes.conf")
+STATE = os.path.join(os.environ.get("XDG_STATE_HOME", os.path.join(HOME, ".local", "state")),
+                     "claude-account-router", "foreign-hooks")
+SELF = "claude-account-hooks"
+EVENTS = {"PreToolUse": "*", "PostToolUse": "*", "UserPromptSubmit": None, "SessionStart": None,
+          "Stop": None, "SubagentStop": None, "PreCompact": None}
+TOOL_EVENTS = {"PreToolUse", "PostToolUse"}
+WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+
+
+def expand(p):
+    p = os.path.expanduser(p.replace("$HOME", HOME))
+    return os.path.realpath(p) if os.path.exists(p) else os.path.normpath(p)
+
+
+def load_config():
+    profiles, routes = {}, []
+    try:
+        lines = open(CONFIG).read().splitlines()
+    except OSError:
+        return profiles, routes
+    for line in lines:
+        line = line.split("#", 1)[0].strip()
+        parts = line.split()
+        if len(parts) >= 3 and parts[0] == "profile":
+            profiles[parts[1]] = expand(parts[2])
+        elif len(parts) >= 3 and parts[0] == "route":
+            routes.append(expand(parts[1]))
+    return profiles, routes
+
+
+def under(path, root):
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def route_for(path, routes):
+    # First matching route wins, as in the router.
+    for r in routes:
+        if under(path, r):
+            return r
+    return None
+
+
+def repo_root(route):
+    try:
+        top = subprocess.run(["git", "-C", route, "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        top = ""
+    return os.path.realpath(top) if top else route
+
+
+def candidate_paths(event):
+    tool_input = event.get("tool_input") or {}
+    found = []
+    for key in ("file_path", "notebook_path", "path"):
+        v = tool_input.get(key)
+        if isinstance(v, str) and v:
+            found.append(("write" if event.get("tool_name") in WRITE_TOOLS else "read", expand(v)))
+    command = tool_input.get("command")
+    if isinstance(command, str):
+        for m in re.finditer(r"(?:^|[\s;&|(])(cd|-C)\s+['\"]?((?:~|/)[^\s'\";&|()]*)", command):
+            found.append(("cwd", expand(m.group(2))))
+        for m in re.finditer(r"(?:~|/home|/Users)[^\s'\"`;&|()<>]*", command):
+            found.append(("read", expand(m.group(0))))
+    cwd = event.get("cwd")
+    if isinstance(cwd, str) and cwd:
+        found.append(("cwd", expand(cwd)))
+    return found
+
+
+def matches(matcher, tool_name):
+    if matcher in (None, "", "*"):
+        return True
+    try:
+        return re.fullmatch(matcher, tool_name or "") is not None
+    except re.error:
+        return False
+
+
+def hooks_of(root, event_name):
+    groups = []
+    for name in ("settings.json", "settings.local.json"):
+        try:
+            data = json.load(open(os.path.join(root, ".claude", name)))
+        except (OSError, ValueError):
+            continue
+        groups += (data.get("hooks") or {}).get(event_name) or []
+    return groups
+
+
+def run(event):
+    project = os.environ.get("CLAUDE_PROJECT_DIR") or event.get("cwd") or ""
+    _, routes = load_config()
+    if not routes:
+        return 0
+    own_route = route_for(expand(project), routes) if project else None
+    session = str(event.get("session_id") or "")
+    event_name = event.get("hook_event_name") or ""
+    tool_name = event.get("tool_name") or ""
+
+    touched, marking = [], []
+    for kind, path in candidate_paths(event):
+        r = route_for(path, routes)
+        if not r or r == own_route:
+            continue
+        if r not in touched:
+            touched.append(r)
+        if kind in ("write", "cwd") and r not in marking:
+            marking.append(r)
+
+    marked = []
+    state_file = os.path.join(STATE, session) if session else None
+    if state_file:
+        try:
+            marked = [l for l in open(state_file).read().splitlines() if l]
+        except OSError:
+            marked = []
+        new = [r for r in marking if r not in marked]
+        if new:
+            os.makedirs(STATE, exist_ok=True)
+            with open(state_file, "a") as f:
+                f.write("".join(r + "\n" for r in new))
+            marked += new
+
+    active = list(marked)
+    if event_name in TOOL_EVENTS:
+        active += [r for r in touched if r not in active]
+    active = [r for r in active if r != own_route]
+
+    contexts, stdin = [], json.dumps(event)
+    for route in active:
+        root = repo_root(route)
+        env = dict(os.environ, CLAUDE_PROJECT_DIR=root)
+        for group in hooks_of(root, event_name):
+            if event_name in TOOL_EVENTS and not matches(group.get("matcher"), tool_name):
+                continue
+            for hook in group.get("hooks") or []:
+                command = hook.get("command") or ""
+                if hook.get("type", "command") != "command" or not command or SELF in command:
+                    continue
+                try:
+                    p = subprocess.run(["bash", "-c", command], input=stdin, capture_output=True,
+                                       text=True, cwd=root, env=env,
+                                       timeout=float(hook.get("timeout") or 60))
+                except subprocess.TimeoutExpired:
+                    sys.stderr.write(f"{SELF}: {command} timed out\n")
+                    continue
+                if p.returncode == 2:
+                    sys.stderr.write(p.stderr)
+                    return 2
+                if p.returncode != 0:
+                    sys.stderr.write(p.stderr)
+                    continue
+                out = p.stdout.strip()
+                if not out:
+                    continue
+                try:
+                    answer = json.loads(out)
+                except ValueError:
+                    if event_name in ("UserPromptSubmit", "SessionStart"):
+                        contexts.append(out)
+                    continue
+                if not isinstance(answer, dict):
+                    continue
+                specific = answer.get("hookSpecificOutput") or {}
+                if specific.get("permissionDecision") in ("deny", "ask") or \
+                        answer.get("decision") == "block" or answer.get("continue") is False:
+                    print(out)
+                    return 0
+                if specific.get("additionalContext"):
+                    contexts.append(specific["additionalContext"])
+    if contexts:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": event_name,
+                                                 "additionalContext": "\n\n".join(contexts)}},
+                         ensure_ascii=False))
+    return 0
+
+
+def command_line():
+    return os.path.join(HOME, ".local", "bin", SELF) + " run"
+
+
+def registered(settings, event_name):
+    return any(SELF in (h.get("command") or "")
+               for g in (settings.get("hooks") or {}).get(event_name) or []
+               for h in g.get("hooks") or [])
+
+
+def profile_settings():
+    profiles, _ = load_config()
+    return [os.path.join(d, "settings.json") for d in profiles.values() if os.path.isdir(d)]
+
+
+def install(replace):
+    for path in profile_settings():
+        try:
+            settings = json.load(open(path))
+        except OSError:
+            settings = {}
+        except ValueError:
+            print(f"skipped {path}: not valid JSON, left untouched")
+            continue
+        before = json.dumps(settings, sort_keys=True)
+        hooks = settings.setdefault("hooks", {})
+        for event_name, groups in list(hooks.items()):
+            kept = []
+            for g in groups:
+                g["hooks"] = [h for h in g.get("hooks") or [] if h.get("command") not in replace]
+                if g["hooks"]:
+                    kept.append(g)
+            hooks[event_name] = kept
+        for event_name, matcher in EVENTS.items():
+            if not registered(settings, event_name):
+                group = {"hooks": [{"type": "command", "command": command_line()}]}
+                if matcher:
+                    group = {"matcher": matcher, **group}
+                hooks.setdefault(event_name, []).append(group)
+        if json.dumps(settings, sort_keys=True) == before:
+            print(f"already registered: {path}")
+            continue
+        if os.path.exists(path):
+            with open(path + ".before-claude-account-hooks", "w") as f:
+                f.write(open(path).read())
+        text = json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
+        json.loads(text)
+        with open(path + ".new", "w") as f:
+            f.write(text)
+        os.replace(path + ".new", path)
+        print(f"registered: {path}")
+    return 0
+
+
+def check():
+    missing = []
+    for path in profile_settings():
+        try:
+            settings = json.load(open(path))
+        except (OSError, ValueError):
+            settings = {}
+        missing += [f"{path} {e}" for e in EVENTS if not registered(settings, e)]
+    for m in missing:
+        print(f"missing: {m}")
+    if not missing:
+        print("registered in every profile")
+    return 1 if missing else 0
+
+
+def main(argv):
+    verb = argv[1] if len(argv) > 1 else "run"
+    if verb == "run":
+        try:
+            event = json.load(sys.stdin)
+        except ValueError:
+            return 0
+        return run(event)
+    if verb == "install":
+        replace = [argv[i + 1] for i, a in enumerate(argv) if a == "--replace" and i + 1 < len(argv)]
+        return install(replace)
+    if verb == "check":
+        return check()
+    print(__doc__)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

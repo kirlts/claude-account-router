@@ -184,6 +184,23 @@ A project whose folder no longer exists gets no link. Its history still belongs 
 
 Note the boundary: this isolates data at rest, and the name that makes history reachable sits in the default profile. MCP servers, skills and instructions are shared or separated by how you build each config dir.
 
+## Hooks follow the work, not the folder
+
+Claude Code runs a project's `.claude/settings.json` hooks only in a session opened in that project. A session opened anywhere else, for example a relief session on another account taking over when the first one ran out of quota, can edit files of a repository whose guards never run. Remembering to run them by hand is exactly what hooks exist to avoid.
+
+```bash
+claude-account-hooks install    # registers it in every profile's settings.json
+claude-account-hooks check      # exit 0 if every profile has it
+```
+
+Once registered, it runs as a hook of its own on every event and applies the hooks of the repositories the session is working on:
+
+- A tool call that touches a declared repository (a file path inside it, the call's working directory, or a `cd` or `git -C` into it) runs that repository's hooks for that call. A block passes through unchanged.
+- A session that wrote into a repository, or ran a command from inside it, is marked as working there. From then on, prompts, session start, stop and every tool call also run that repository's hooks, so reminders and guards behave as if the session had been opened there. Reading a file does not mark a session.
+- The repository the session was opened in is skipped, since Claude Code already runs its hooks.
+
+Only repositories claimed by a `route` in `routes.conf` are trusted. Looking at a repository you never declared never executes its hooks. `install --replace <command>` removes an older hook entry in the same pass. It keeps a backup of each settings file it changes and does nothing when everything is already registered.
+
 ## Known limits
 
 **The wrapper is honored by the process, not by the editor.** The router affects the Claude process the extension launches. The editor process itself runs outside it, which has two consequences. `Claude Code: Logout` from the panel can act on the default config dir rather than the profile you are in, so use `claude-account logout <profile>`, which names the directory explicitly. And the panel reads every folder's past sessions from the default config dir, which is why isolated history needs the link described above.
@@ -204,6 +221,7 @@ new path, because the marker lives inside the folder that changed name.
 
 ```bash
 ./tests/test-routing.sh
+./tests/test-foreign-hooks.sh
 ```
 
 Forty end to end cases against a throwaway `HOME`: routing by path, by subfolder, by deeply nested subfolder, through a symlink, by worktree outside the repo tree, fallback to default, the marker commands including that they preserve pre-existing settings, the isolation of memory and history, the links that keep it visible by folder, and five fail closed paths (wrong account for a profile, an account leaking into the default profile, unreadable identity, missing config dir, missing config file). One case asserts that a profile with no session still starts, since otherwise the first login would be impossible.

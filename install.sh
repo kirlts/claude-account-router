@@ -12,7 +12,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 PREFIX="${PREFIX:-$HOME/.local/bin}"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/claude-account-router"
-COMMANDS=(claude-account-router claude-account claude-account-check)
+COMMANDS=(claude-account-router claude-account claude-account-check claude-account-hooks)
 
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 dim()   { printf '\033[90m%s\033[0m\n' "$*"; }
