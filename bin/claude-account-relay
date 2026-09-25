@@ -1,0 +1,576 @@
+#!/usr/bin/env python3
+"""claude-account-relay: when the account a session runs under is out of quota, another
+declared account resumes the SAME session, with its context, so nobody has to notice and say
+"continue".
+
+This is the general form of a pattern proven first for one specific repository (see
+docs/MEMORY.md): the same account can be shared by several projects, and each project already
+declares, in routes.conf, which profiles it may use. This command works for any of them —
+pass --repo, or run it from inside the repository.
+
+WHAT IT MEASURES, AND WHERE FROM
+  - Real quota, per account, from the same query Claude Code's own `/usage` uses
+    (`GET https://api.anthropic.com/api/oauth/usage` with that profile's own credential). No
+    threshold is invented: "blocked" is whatever window the API itself reports at 100%.
+  - Profiles and their folders come from routes.conf, exactly like the router itself reads them.
+  - Which session is working: the one this relay itself launched (a tmux window), or, the first
+    time, a session already open on --repo from any editor extension or a raw CLI login (read
+    from /proc: its cwd, its CLAUDE_CONFIG_DIR, and the --resume=<id> it started with, when there
+    is one).
+
+WHAT IT DOES WHEN THE ACCOUNT THAT IS WORKING IS BLOCKED
+  1. Commits whatever is uncommitted, as WIP, in every worktree of --repo that has changes.
+  2. Picks the first account with headroom, in --profiles order, and launches in tmux the SAME
+     session, resumed with `--resume <id> --fork-session` — its whole context carries over. The
+     new window is visible with an input channel (`tmux attach -t <name>`), never a background
+     job with nobody able to talk to it.
+  3. If the relieved session was itself one this relay had launched, closes it: its own monitors
+     must not wake up and work in parallel once its account resets.
+  If no account has headroom, it waits for the nearest reset the API itself reports.
+
+    claude-account-relay --repo ~/some-project --estado         # quota of each account, who's working
+    claude-account-relay --repo ~/some-project --una-vez --sin-lanzar   # one pass, dry-run
+    claude-account-relay --repo ~/some-project --una-vez        # one pass, acting if warranted
+    claude-account-relay --repo ~/some-project                  # stays watching, every 5 min
+    claude-account-relay --repo ~/some-project --profiles work,default
+
+Tests: tests/test-relay.py — every case runs against a throwaway HOME and a stub `claude`
+binary; nothing here ever calls a real account or spends real quota.
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+CADENCIA_S = 5 * 60
+URL_USO = "https://api.anthropic.com/api/oauth/usage"
+LIMITE = re.compile(r"hit your (weekly|session|usage|.*?)limit|out of usage|usage limit reached|rate.?limit", re.I)
+DIALOGOS = (
+    ("Yes, I trust this folder", ("Down", "Enter")),
+    ("Yes, I accept", ("Down", "Enter")),
+    ("Choose the text style", ("Enter",)),
+)
+
+
+def ahora():
+    return dt.datetime.now().astimezone()
+
+
+def sello(t=None):
+    return (t or ahora()).strftime("%Y-%m-%d %H:%M:%S")
+
+
+class Relay:
+    def __init__(self, repo, config_home=None, state_home=None, home=None,
+                 fetch_usage=None, claude_bin=None, model=None):
+        self.repo = Path(repo).resolve()
+        self.slug = re.sub(r"[^a-zA-Z0-9]", "-", str(self.repo))
+        self.home = Path(home or os.environ.get("HOME"))
+        self.config_home = Path(config_home) if config_home else \
+            Path(os.environ.get("XDG_CONFIG_HOME", self.home / ".config")) / "claude-account-router"
+        self.routes_file = self.config_home / "routes.conf"
+        self.state_dir = Path(state_home) if state_home else \
+            self.home / ".local" / "state" / "claude-account-relay" / self.repo.name
+        self.estado_path = self.state_dir / "estado.json"
+        self.bitacora_path = self.state_dir / "relevo.log"
+        self.notas_path = self.state_dir / "notas-para-el-relevo.md"
+        self.tmux_name = f"relevo-{self.repo.name}"
+        self.vigia_name = f"vigia-del-relevo-{self.repo.name}"
+        # Injectable for tests: a function(token) -> parsed usage dict, replacing the real HTTP call.
+        self._fetch_usage = fetch_usage or self._fetch_usage_real
+        self._claude_bin = claude_bin
+        self.model = model
+
+    # ── logging / state ──────────────────────────────────────────────────
+    def anotar(self, texto):
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        linea = f"[{sello()}] {texto}"
+        print(linea, flush=True)
+        with self.bitacora_path.open("a") as f:
+            f.write(linea + "\n")
+
+    def leer_estado(self):
+        try:
+            return json.loads(self.estado_path.read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def guardar_estado(self, e):
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.estado_path.write_text(json.dumps(e, indent=2, ensure_ascii=False))
+
+    # ── profiles, from routes.conf, same format the router itself reads ──
+    def perfiles_declarados(self):
+        perfiles = {}
+        if not self.routes_file.exists():
+            return perfiles
+        for linea in self.routes_file.read_text().splitlines():
+            partes = linea.split()
+            if len(partes) >= 3 and partes[0] == "profile":
+                perfiles[partes[1]] = Path(os.path.expanduser(partes[2]))
+        if "default" not in perfiles:
+            perfiles["default"] = self.home / ".claude"
+        return perfiles
+
+    def perfil_de_esta_ruta(self):
+        """Which profile routes.conf assigns to self.repo, longest match wins — same rule the
+        router itself uses for routing by path."""
+        if not self.routes_file.exists():
+            return None
+        mejor = None
+        for linea in self.routes_file.read_text().splitlines():
+            partes = linea.split()
+            if len(partes) >= 3 and partes[0] == "route":
+                ruta = Path(os.path.expanduser(partes[1]))
+                try:
+                    self.repo.relative_to(ruta)
+                except ValueError:
+                    if self.repo != ruta:
+                        continue
+                if mejor is None or len(str(ruta)) > len(str(mejor[0])):
+                    mejor = (ruta, partes[2])
+        return mejor[1] if mejor else None
+
+    def orden_por_defecto(self):
+        primero = self.perfil_de_esta_ruta()
+        resto = [p for p in self.perfiles_declarados() if p != primero]
+        return ([primero] if primero else []) + resto
+
+    def email_de(self, carpeta):
+        for archivo in (carpeta / ".claude.json",
+                        self.home / ".claude.json" if carpeta == self.home / ".claude" else None):
+            if archivo is None:
+                continue
+            try:
+                return json.loads(archivo.read_text()).get("oauthAccount", {}).get("emailAddress", "?")
+            except (OSError, ValueError, AttributeError):
+                continue
+        return "?"
+
+    def credencial(self, carpeta):
+        try:
+            return json.loads((carpeta / ".credentials.json").read_text())["claudeAiOauth"]["accessToken"]
+        except (OSError, ValueError, KeyError):
+            return None
+
+    def binario_de_claude(self):
+        if self._claude_bin:
+            return self._claude_bin
+        candidatos = sorted(
+            self.home.glob(".vscode/extensions/anthropic.claude-code-*/resources/native-binary/claude"),
+            key=lambda p: [int(x) for x in re.findall(r"\d+", p.parts[-4])])
+        if candidatos:
+            return str(candidatos[-1])
+        return shutil.which("claude") or "claude"
+
+    @staticmethod
+    def _fetch_usage_real(token):
+        req = urllib.request.Request(URL_USO, headers={
+            "Authorization": "Bearer " + token, "anthropic-beta": "oauth-2025-04-20",
+            "User-Agent": "claude-code/claude-account-relay"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.load(resp)
+
+    def uso_de(self, carpeta):
+        """{'bloqueada': bool|None, 'ventanas': [(kind, percent, resets_at)], 'reinicio': datetime|None, 'error': str|None}"""
+        token = self.credencial(carpeta)
+        if not token:
+            return {"bloqueada": None, "ventanas": [], "reinicio": None, "error": "sin credencial"}
+        try:
+            j = self._fetch_usage(token)
+        except urllib.error.HTTPError as e:
+            return {"bloqueada": None, "ventanas": [], "reinicio": None, "error": f"HTTP {e.code}"}
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            return {"bloqueada": None, "ventanas": [], "reinicio": None, "error": str(e)}
+
+        ventanas = []
+        for l in j.get("limits") or []:
+            if l.get("scope"):
+                continue
+            ventanas.append((l.get("kind"), l.get("percent"), l.get("resets_at")))
+        if not ventanas:
+            for k in ("five_hour", "seven_day"):
+                v = j.get(k) or {}
+                u = v.get("utilization")
+                ventanas.append((k, (u * 100) if isinstance(u, (int, float)) else None, v.get("resets_at")))
+        bloqueada = any((p or 0) >= 100 for _, p, _ in ventanas)
+        reinicio = None
+        if bloqueada:
+            fechas = [dt.datetime.fromisoformat(r) for _, p, r in ventanas if (p or 0) >= 100 and r]
+            reinicio = max(fechas) if fechas else None
+        return {"bloqueada": bloqueada, "ventanas": ventanas, "reinicio": reinicio, "error": None}
+
+    def resumen_de_uso(self, u):
+        if u["error"] and u["bloqueada"] is None:
+            return f"unknown ({u['error']})"
+        partes = []
+        for k, p, r in u["ventanas"]:
+            cuando = dt.datetime.fromisoformat(r).astimezone().strftime("%d %H:%M") if r else "?"
+            partes.append(f"{k} {(p or 0):.0f}% (resets {cuando})")
+        return ("BLOCKED · " if u["bloqueada"] else "has headroom · ") + ", ".join(partes)
+
+    # ── tmux ──────────────────────────────────────────────────────────────
+    @staticmethod
+    def tmux(*args, **kw):
+        return subprocess.run(["tmux", *args], capture_output=True, text=True, **kw)
+
+    def hay_tmux(self, nombre):
+        return self.tmux("has-session", "-t", "=" + nombre).returncode == 0
+
+    # ── who is working: /proc for an editor-launched session, or our own tmux one ──
+    def sesion_de_editor(self):
+        for proc in Path("/proc").glob("[0-9]*"):
+            try:
+                if os.readlink(proc / "cwd") != str(self.repo):
+                    continue
+                argv = (proc / "cmdline").read_bytes().split(b"\0")
+                if not argv or not argv[0].endswith(b"/claude"):
+                    continue
+                env = dict(x.split(b"=", 1) for x in (proc / "environ").read_bytes().split(b"\0") if b"=" in x)
+            except OSError:
+                continue
+            carpeta = env.get(b"CLAUDE_CONFIG_DIR", str(self.home / ".claude").encode()).decode()
+            sid = None
+            for i, a in enumerate(argv):
+                m = re.match(rb"--resume=([0-9a-f-]{36})", a)
+                if m:
+                    sid = m.group(1).decode()
+                elif a == b"--resume" and i + 1 < len(argv) and re.match(rb"^[0-9a-f-]{36}$", argv[i + 1]):
+                    sid = argv[i + 1].decode()
+            return {"origen": "editor", "pid": int(proc.name), "carpeta": carpeta, "sesion": sid}
+        return None
+
+    def carpeta_real_de_transcripciones(self):
+        for c in sorted(self.home.glob(f".claude*/projects/{self.slug}")):
+            if c.is_dir():
+                return c.resolve()
+        return None
+
+    def sesion_mas_nueva(self, desde=None, distinta_de=None):
+        c = self.carpeta_real_de_transcripciones()
+        if not c:
+            return None
+        mejor = None
+        for f in c.glob("*.jsonl"):
+            if distinta_de and f.stem == distinta_de:
+                continue
+            if desde and f.stat().st_mtime < desde:
+                continue
+            if not mejor or f.stat().st_mtime > mejor.stat().st_mtime:
+                mejor = f
+        return mejor.stem if mejor else None
+
+    def transcripcion_de(self, sid):
+        c = self.carpeta_real_de_transcripciones()
+        f = c / f"{sid}.jsonl" if c else None
+        return f if f and f.exists() else None
+
+    def cola_de_asistente(self, sid):
+        f = self.transcripcion_de(sid)
+        if not f:
+            return []
+        with f.open("rb") as fh:
+            fh.seek(max(0, f.stat().st_size - 2_000_000))
+            cola = fh.read().decode("utf-8", "replace").splitlines()
+        mensajes = []
+        for linea in reversed(cola):
+            try:
+                d = json.loads(linea)
+            except ValueError:
+                continue
+            if d.get("type") != "assistant":
+                continue
+            c = d.get("message", {}).get("content")
+            texto = c if isinstance(c, str) else next(
+                (b["text"] for b in c or [] if b.get("type") == "text" and b["text"].strip()), "")
+            mensajes.append((texto, d.get("timestamp")))
+        return mensajes
+
+    def ultimo_texto_del_asistente(self, sid):
+        cola = self.cola_de_asistente(sid)
+        return cola[0] if cola else (None, None)
+
+    def quien_trabaja(self, estado):
+        r = estado.get("relevo")
+        if r and self.hay_tmux(r["tmux"]):
+            if not r.get("sesion"):
+                r["sesion"] = self.sesion_mas_nueva(desde=r["lanzado_epoch"], distinta_de=r["sesion_anterior"])
+            return dict(r, origen="tmux")
+        return self.sesion_de_editor()
+
+    # ── what would be lost ──────────────────────────────────────────────
+    def worktrees(self):
+        r = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=str(self.repo),
+                            capture_output=True, text=True)
+        return [Path(l.split(" ", 1)[1]) for l in r.stdout.splitlines()
+                if l.startswith("worktree ")]
+
+    def worktrees_con_cambios(self):
+        con_cambios = []
+        for w in self.worktrees():
+            if not w.exists():
+                continue
+            st = subprocess.run(["git", "status", "--porcelain"], cwd=str(w),
+                                 capture_output=True, text=True).stdout
+            if [l for l in st.splitlines() if "node_modules" not in l]:
+                rama = subprocess.run(["git", "branch", "--show-current"], cwd=str(w),
+                                       capture_output=True, text=True).stdout.strip()
+                con_cambios.append(f"{w.name} (branch {rama or 'detached'})")
+        return con_cambios
+
+    def guardar_wip(self, motivo):
+        guardados = []
+        for w in self.worktrees():
+            if not w.exists():
+                continue
+            st = subprocess.run(["git", "status", "--porcelain"], cwd=str(w),
+                                 capture_output=True, text=True).stdout
+            if not [l for l in st.splitlines() if "node_modules" not in l]:
+                continue
+            subprocess.run(["git", "add", "-A", "."], cwd=str(w), capture_output=True)
+            msg = (f"WIP: uncommitted work when the account ran out of quota ({motivo})\n\n"
+                   "Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>\n")
+            r = subprocess.run(["git", "commit", "-q", "-F", "-"], cwd=str(w), input=msg,
+                                capture_output=True, text=True)
+            rama = subprocess.run(["git", "branch", "--show-current"], cwd=str(w),
+                                   capture_output=True, text=True).stdout.strip()
+            if r.returncode == 0:
+                sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=str(w),
+                                      capture_output=True, text=True).stdout.strip()
+                guardados.append(f"{w.name} (branch {rama}) -> {sha}")
+            else:
+                guardados.append(f"{w.name} (branch {rama}) -> could NOT commit: {(r.stderr or r.stdout).strip()[:200]}")
+        return guardados
+
+    # ── the handoff message ──────────────────────────────────────────────
+    def encargo(self, anterior, perfil_nuevo, carpeta_nueva, guardados, ultimo_texto, cuando):
+        lineas = [
+            f"Automatic quota relay, {sello()}.",
+            "",
+            f"You are the continuation of session {anterior['sesion']}, which ran out of quota on "
+            f"account {self.email_de(Path(anterior['carpeta']))} ({cuando or 'time not recorded'}; "
+            f"its last message was «{(ultimo_texto or '').strip()[:120]}»). "
+            f"claude-account-relay launched you (runs in tmux, window «{self.vigia_name}», log "
+            f"{self.bitacora_path}) on account {self.email_de(carpeta_nueva)} (profile {perfil_nuevo}), "
+            "resuming your own transcript with --fork-session: you have your whole context.",
+            "",
+            "Measured by the relay, act on it, do not re-derive it:",
+            "- WIP saved as a commit in: " + ("; ".join(guardados) if guardados else
+                                                "no worktree had uncommitted changes") + ".",
+            "- If the account fills up again, this same relay replaces you with another account "
+            "without anyone asking: do not wait for a notice; commit from the first minute.",
+        ]
+        if self.notas_path.exists() and self.notas_path.read_text().strip():
+            lineas += ["", "Notes left for this relay (verbatim):", "", self.notas_path.read_text().strip()]
+        return "\n".join(lineas)
+
+    # ── launching the relief session ─────────────────────────────────────
+    def aceptar_dialogos_de_arranque(self, carpeta):
+        archivo = self.home / ".claude.json" if carpeta == self.home / ".claude" else carpeta / ".claude.json"
+        try:
+            d = json.loads(archivo.read_text())
+        except (OSError, ValueError):
+            return
+        proyecto = d.setdefault("projects", {}).setdefault(str(self.repo), {})
+        cambios = []
+        if not proyecto.get("hasTrustDialogAccepted"):
+            proyecto["hasTrustDialogAccepted"] = True
+            cambios.append("folder trust")
+        if not d.get("bypassPermissionsModeAccepted"):
+            d["bypassPermissionsModeAccepted"] = True
+            cambios.append("bypass-permissions mode")
+        if cambios:
+            temporal = archivo.with_suffix(".json.relay")
+            temporal.write_text(json.dumps(d, indent=2, ensure_ascii=False))
+            temporal.chmod(0o600)
+            os.replace(temporal, archivo)
+            self.anotar(f"{archivo}: pre-accepted " + " and ".join(cambios))
+
+    def asegurar_vista_del_proyecto(self, carpeta_nueva):
+        real = self.carpeta_real_de_transcripciones()
+        destino = carpeta_nueva / "projects" / self.slug
+        if real and not destino.exists():
+            destino.parent.mkdir(parents=True, exist_ok=True)
+            destino.symlink_to(real)
+            self.anotar(f"linked {destino} -> {real}")
+
+    def atender_dialogos_de_la_ventana(self, nombre):
+        pantalla = self.tmux("capture-pane", "-p", "-t", f"{nombre}:0").stdout
+        for marca, teclas in DIALOGOS:
+            if marca in pantalla:
+                self.tmux("send-keys", "-t", f"{nombre}:0", *teclas)
+                self.anotar(f"window «{nombre}» showed «{marca}»: answered with {' '.join(teclas)}")
+                return True
+        if "Select login method" in pantalla:
+            self.anotar(f"ALARM: window «{nombre}» asks to log in; the profile has no valid credential for the terminal")
+        return False
+
+    def lanzar(self, perfil, carpeta, anterior, texto, estado, espera_arranque=None):
+        self.asegurar_vista_del_proyecto(carpeta)
+        self.aceptar_dialogos_de_arranque(carpeta)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        marca = ahora().strftime("%Y%m%d-%H%M%S")
+        archivo_encargo = self.state_dir / f"encargo-{marca}.md"
+        archivo_encargo.write_text(texto)
+        lanzador = self.state_dir / f"lanzar-{marca}.sh"
+        modelo = f" --model '{self.model}'" if self.model else ""
+        lanzador.write_text(
+            "#!/usr/bin/env bash\n"
+            f"cd {self.repo} || exit 1\n"
+            + ("unset CLAUDE_CONFIG_DIR\n" if carpeta == self.home / ".claude"
+               else f"export CLAUDE_CONFIG_DIR={carpeta}\n")
+            + f"exec {self.binario_de_claude()} --resume {anterior['sesion']} --fork-session{modelo} "
+              f"--permission-mode bypassPermissions --name 'relay-{perfil}-{marca}' \"$(cat {archivo_encargo})\"\n")
+        lanzador.chmod(0o755)
+        if self.hay_tmux(self.tmux_name):
+            self.tmux("rename-session", "-t", "=" + self.tmux_name, f"{self.tmux_name}-relieved-{marca}")
+        r = self.tmux("new-session", "-d", "-s", self.tmux_name, "-c", str(self.repo), str(lanzador))
+        if r.returncode != 0:
+            self.anotar(f"could NOT open tmux: {r.stderr.strip()}")
+            return False
+        estado["relevo"] = {
+            "tmux": self.tmux_name, "perfil": perfil, "carpeta": str(carpeta), "lanzado": sello(),
+            "lanzado_epoch": time.time(), "sesion_anterior": anterior["sesion"], "sesion": None,
+            "encargo": str(archivo_encargo),
+        }
+        estado.setdefault("historial", []).append({"cuando": sello(), "perfil": perfil, "desde": anterior["sesion"]})
+        self.guardar_estado(estado)
+        self.anotar(f"RELAY: session {anterior['sesion']} -> account {self.email_de(carpeta)} (profile {perfil}) "
+                    f"in tmux «{self.tmux_name}». Handoff: {archivo_encargo}. Attach: tmux attach -t {self.tmux_name}")
+        limite = time.time() + (espera_arranque if espera_arranque is not None else CADENCIA_S)
+        while time.time() < limite:
+            time.sleep(2)
+            if self.atender_dialogos_de_la_ventana(self.tmux_name):
+                continue
+            if "❯ " in self.tmux("capture-pane", "-p", "-t", f"{self.tmux_name}:0").stdout:
+                break
+        return True
+
+    def cerrar_relevada(self, marca_tmux):
+        if marca_tmux and self.hay_tmux(marca_tmux):
+            self.tmux("kill-session", "-t", "=" + marca_tmux)
+            self.anotar(f"closed window {marca_tmux} (its account is blocked; its own monitors must not wake up in parallel)")
+
+    # ── one pass ─────────────────────────────────────────────────────────
+    def pasada(self, perfiles_orden, sin_lanzar, espera_arranque=None):
+        estado = self.leer_estado()
+        perfiles = self.perfiles_declarados()
+        usos = {p: self.uso_de(perfiles[p]) for p in perfiles_orden if p in perfiles}
+        for p, u in usos.items():
+            self.anotar(f"quota {p} ({self.email_de(perfiles[p])}): {self.resumen_de_uso(u)}")
+
+        trabaja = self.quien_trabaja(estado)
+        if trabaja and trabaja.get("origen") == "tmux":
+            self.atender_dialogos_de_la_ventana(trabaja["tmux"])
+        if trabaja and trabaja.get("origen") == "tmux" and not trabaja.get("sesion"):
+            self.anotar(f"relay launched {trabaja['lanzado']} in «{trabaja['tmux']}» (profile {trabaja['perfil']}); "
+                        "no transcript written yet")
+            self.guardar_estado(estado)
+            return
+        if not trabaja or not trabaja.get("sesion"):
+            self.anotar(f"no session of {self.repo.name} is working (neither editor nor relay); nothing to relieve")
+            self.guardar_estado(estado)
+            return
+        carpeta_actual = Path(trabaja["carpeta"])
+        perfil_actual = next((p for p, c in perfiles.items() if c == carpeta_actual), carpeta_actual.name)
+        u_actual = usos.get(perfil_actual) or self.uso_de(carpeta_actual)
+        texto, cuando = self.ultimo_texto_del_asistente(trabaja["sesion"])
+        muerta_por_limite = bool(texto and LIMITE.search(texto))
+        self.anotar(f"working: session {trabaja['sesion']} ({trabaja['origen']}, profile {perfil_actual}); "
+                    f"assistant's last message {cuando or '?'}: «{(texto or '').strip()[:90]}»")
+
+        if not (u_actual["bloqueada"] or muerta_por_limite):
+            estado["ultima_pasada"] = sello()
+            self.guardar_estado(estado)
+            return
+
+        motivo = "the API says 100%" if u_actual["bloqueada"] else "its last message is the limit notice"
+        self.anotar(f"the working account is BLOCKED ({motivo})")
+        destino = next((p for p in perfiles_orden if p in usos and usos[p]["bloqueada"] is False
+                         and perfiles[p] != carpeta_actual), None)
+        if not destino:
+            reinicios = [u["reinicio"] for u in usos.values() if u.get("reinicio")]
+            proximo = min(reinicios) if reinicios else None
+            self.anotar("no account has headroom" +
+                         (f"; the first frees up {proximo.astimezone().strftime('%d %H:%M')}" if proximo else ""))
+            estado["esperar_hasta"] = proximo.isoformat() if proximo else None
+            self.guardar_estado(estado)
+            return
+        if sin_lanzar:
+            self.anotar(f"(dry-run) would relieve to {destino} ({self.email_de(perfiles[destino])}) "
+                        f"resuming {trabaja['sesion']}")
+            return
+
+        guardados = self.guardar_wip(f"{sello()}, account {self.email_de(carpeta_actual)}")
+        for g in guardados:
+            self.anotar("WIP: " + g)
+        texto_encargo = self.encargo(trabaja, destino, perfiles[destino], guardados, texto, cuando)
+        if self.lanzar(destino, perfiles[destino], trabaja, texto_encargo, estado, espera_arranque):
+            for s in self.tmux("list-sessions", "-F", "#S").stdout.split():
+                if s.startswith(f"{self.tmux_name}-relieved-"):
+                    self.cerrar_relevada(s)
+
+    def mostrar_estado(self, perfiles_orden):
+        perfiles = self.perfiles_declarados()
+        for p in perfiles_orden:
+            if p in perfiles:
+                print(f"{p:8} {self.email_de(perfiles[p]):28} {self.resumen_de_uso(self.uso_de(perfiles[p]))}")
+        estado = self.leer_estado()
+        t = self.quien_trabaja(estado)
+        if t:
+            texto, cuando = self.ultimo_texto_del_asistente(t["sesion"]) if t.get("sesion") else (None, None)
+            print(f"working: {t.get('origen')} - session {t.get('sesion')} - profile {Path(t['carpeta']).name} "
+                  f"- last message {cuando}: «{(texto or '').strip()[:80]}»")
+        else:
+            print("working: nobody")
+        if estado.get("historial"):
+            print("relays done:", "; ".join(f"{h['cuando']} -> {h['perfil']}" for h in estado["historial"]))
+        print(f"log: {self.bitacora_path}")
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--repo", default=".", help="repository this relay watches (default: cwd)")
+    ap.add_argument("--estado", action="store_true")
+    ap.add_argument("--una-vez", action="store_true")
+    ap.add_argument("--sin-lanzar", action="store_true")
+    ap.add_argument("--profiles", default=None, help="preference order, profile names from routes.conf")
+    ap.add_argument("--model", default=None)
+    a = ap.parse_args(argv)
+
+    relay = Relay(a.repo, model=a.model)
+    orden = [p.strip() for p in a.profiles.split(",") if p.strip()] if a.profiles else relay.orden_por_defecto()
+    if not orden:
+        print(f"no profile is declared for {relay.repo} in {relay.routes_file}", file=sys.stderr)
+        return 1
+
+    if a.estado:
+        relay.mostrar_estado(orden)
+        return 0
+    while True:
+        try:
+            relay.pasada(orden, a.sin_lanzar)
+        except Exception as e:
+            relay.anotar(f"pass failed: {type(e).__name__}: {e}")
+        if a.una_vez:
+            return 0
+        espera = CADENCIA_S
+        hasta = relay.leer_estado().get("esperar_hasta")
+        if hasta:
+            faltan = (dt.datetime.fromisoformat(hasta) - ahora()).total_seconds()
+            if faltan > espera:
+                espera = faltan
+                relay.anotar(f"all blocked: sleeping until {dt.datetime.fromisoformat(hasta).astimezone().strftime('%d %H:%M')}")
+        time.sleep(espera)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
