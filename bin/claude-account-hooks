@@ -13,7 +13,9 @@ session is working on, as if the session had been opened there:
     `cd`/`git -C` into it in a Bash command) runs that repository's hooks for that call.
   * A session that wrote into a repository, or ran a command from inside it, is marked as working
     there, and from then on every event of the session (prompts, session start, stop, every tool
-    call) also runs that repository's hooks. Reading a file does not mark.
+    call) also runs that repository's hooks. Reading a file does not mark, and neither does a
+    read-only `git -C <repo> <subcommand>` (show, log, diff, status, and the like) — that inspects
+    the repository without working in it, same as reading a file inside it would.
   * A block (exit 2, or a JSON deny/block decision) is passed through unchanged. Context that the
     hooks add is merged into one answer.
   * Nothing runs for the repository the session was opened in: Claude Code already runs those.
@@ -86,6 +88,30 @@ def repo_root(route):
     return os.path.realpath(top) if top else route
 
 
+GIT_READONLY_SUBCOMMANDS = {
+    "show", "log", "diff", "grep", "ls-files", "ls-tree", "cat-file", "rev-parse",
+    "status", "blame", "for-each-ref", "merge-base", "describe", "shortlog", "rev-list",
+}
+GIT_BRANCH_READONLY_FLAGS = {"--list", "-a", "-r", "-v", "-vv", "--color", "--no-color"}
+
+
+def git_c_kind(rest):
+    """rest = the command text right after 'git -C <path>'. 'read' for a read-only
+    subcommand, 'cwd' (marks, like any other cd/-C) for anything else, including one we
+    don't recognize."""
+    m = re.match(r"\s+(\S+)(.*)", rest)
+    if not m:
+        return "cwd"
+    sub, args = m.group(1), m.group(2).split()
+    if sub in GIT_READONLY_SUBCOMMANDS:
+        return "read"
+    if sub == "branch":
+        return "read" if all(a in GIT_BRANCH_READONLY_FLAGS for a in args) else "cwd"
+    if sub == "config":
+        return "read" if args[:1] == ["--get"] else "cwd"
+    return "cwd"
+
+
 def candidate_paths(event):
     tool_input = event.get("tool_input") or {}
     found = []
@@ -96,7 +122,10 @@ def candidate_paths(event):
     command = tool_input.get("command")
     if isinstance(command, str):
         for m in re.finditer(r"(?:^|[\s;&|(])(cd|-C)\s+['\"]?((?:~|/)[^\s'\";&|()]*)", command):
-            found.append(("cwd", expand(m.group(2))))
+            kind = "cwd"
+            if m.group(1) == "-C" and re.search(r"\bgit\s+$", command[:m.start(1)]):
+                kind = git_c_kind(command[m.end():])
+            found.append((kind, expand(m.group(2))))
         for m in re.finditer(r"(?:~|/home|/Users)[^\s'\"`;&|()<>]*", command):
             found.append(("read", expand(m.group(0))))
     cwd = event.get("cwd")
