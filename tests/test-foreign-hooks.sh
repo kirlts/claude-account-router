@@ -80,6 +80,22 @@ hook "$OWN" "$(printf '{"hook_event_name":"PreToolUse","session_id":"s5","cwd":"
 hook "$OWN" "$(prompt_event s5)"
 printf '%s' "$OUT" | grep -q "REMINDER from foreign" && ok "a cd into the repository marks the session" || no "cd did not mark: $OUT"
 
+hook "$OWN" "$(printf '{"hook_event_name":"PreToolUse","session_id":"s9","cwd":"%s","tool_name":"Bash","tool_input":{"command":"git -C %s show HEAD:x"}}' "$OWN" "$FOREIGN")"
+hook "$OWN" "$(prompt_event s9)"
+[ -z "$OUT" ] && ok "a read-only git -C into the repository does not mark the session" || no "read-only git -C marked: $OUT"
+
+hook "$OWN" "$(printf '{"hook_event_name":"PreToolUse","session_id":"s9b","cwd":"%s","tool_name":"Bash","tool_input":{"command":"git -C %s log --oneline -5"}}' "$OWN" "$FOREIGN")"
+hook "$OWN" "$(prompt_event s9b)"
+[ -z "$OUT" ] && ok "git -C log into the repository does not mark the session" || no "read-only git -C log marked: $OUT"
+
+hook "$OWN" "$(printf '{"hook_event_name":"PreToolUse","session_id":"s10","cwd":"%s","tool_name":"Bash","tool_input":{"command":"git -C %s commit -am x"}}' "$OWN" "$FOREIGN")"
+hook "$OWN" "$(prompt_event s10)"
+printf '%s' "$OUT" | grep -q "REMINDER from foreign" && ok "a write git -C into the repository (commit) marks the session" || no "write git -C did not mark: $OUT"
+
+hook "$OWN" "$(printf '{"hook_event_name":"PreToolUse","session_id":"s11","cwd":"%s","tool_name":"Bash","tool_input":{"command":"git -C %s checkout main"}}' "$OWN" "$FOREIGN")"
+hook "$OWN" "$(prompt_event s11)"
+printf '%s' "$OUT" | grep -q "REMINDER from foreign" && ok "a write git -C into the repository (checkout) marks the session" || no "write git -C checkout did not mark: $OUT"
+
 hook "$FOREIGN" "$(write_event s6 "$FOREIGN/src/a.js" FORBIDDEN "$FOREIGN")"
 [ "$RC" = 0 ] && ok "nothing is run twice when the session was opened in that repository" || no "own repository ran again (rc=$RC)"
 

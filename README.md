@@ -196,7 +196,7 @@ claude-account-hooks check      # exit 0 if every profile has it
 Once registered, it runs as a hook of its own on every event and applies the hooks of the repositories the session is working on:
 
 - A tool call that touches a declared repository (a file path inside it, the call's working directory, or a `cd` or `git -C` into it) runs that repository's hooks for that call. A block passes through unchanged.
-- A session that wrote into a repository, or ran a command from inside it, is marked as working there. From then on, prompts, session start, stop and every tool call also run that repository's hooks, so reminders and guards behave as if the session had been opened there. Reading a file does not mark a session.
+- A session that wrote into a repository, or ran a command from inside it, is marked as working there. From then on, prompts, session start, stop and every tool call also run that repository's hooks, so reminders and guards behave as if the session had been opened there. Reading a file does not mark a session, and neither does a read-only `git -C <repo> <subcommand>` (`show`, `log`, `diff`, `status`, and the like) — only a `git -C` that writes to the repository marks it.
 - The repository the session was opened in is skipped, since Claude Code already runs its hooks.
 
 Only repositories claimed by a `route` in `routes.conf` are trusted. Looking at a repository you never declared never executes its hooks. `install --replace <command>` removes an older hook entry in the same pass. It keeps a backup of each settings file it changes and does nothing when everything is already registered.
