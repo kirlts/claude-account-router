@@ -540,6 +540,10 @@ CAR_UNIT_STATE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/claude-account-router"
 # at most to shut down in order; a stray that ignores SIGTERM lasts no longer.
 CAR_UNIT_STOP_TIMEOUT="${CLAUDE_ROUTER_STOP_TIMEOUT:-10}"
 
+# A launch that ends in an error sooner than this many seconds did not get as
+# far as being a session. It is the window for turning the units off unasked.
+CAR_UNIT_EARLY_FAILURE="${CLAUDE_ROUTER_EARLY_FAILURE:-15}"
+
 # Why a launch stays outside a unit, or nothing when a unit can hold it.
 car_unit_unavailable_reason() {
   if [ "${CLAUDE_ROUTER_NO_UNIT:-}" = 1 ]; then printf 'CLAUDE_ROUTER_NO_UNIT=1'; return; fi
@@ -574,6 +578,7 @@ car_run_in_session_unit() {
   local unit started cli rc touch_bin
   local -a env_args=() bind=()
   CAR_UNIT_STARTED=0
+  CAR_UNIT_SIGNALLED=0
   unit="claude-session-$$-$(date +%s)"
   mkdir -p "$CAR_UNIT_STATE" 2>/dev/null || return 1
   started="$CAR_UNIT_STATE/$unit.started"
@@ -588,8 +593,9 @@ car_run_in_session_unit() {
   # systemd-run does not forward SIGTERM or SIGINT to the unit: measured, the
   # service kept running after its client was signalled. The editor closes a
   # session by signalling this process, so the signal has to become a stop.
+  CAR_UNIT_SIGNALLED=0
   # shellcheck disable=SC2064
-  trap "systemctl --user stop '$unit.service' 2>/dev/null" TERM INT HUP
+  trap "CAR_UNIT_SIGNALLED=1; systemctl --user stop '$unit.service' 2>/dev/null" TERM INT HUP
 
   # --expand-environment=no: by default the service manager rewrites ${NAME} and
   # $NAME inside the arguments, so a prompt that mentions a variable would

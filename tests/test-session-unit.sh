@@ -25,11 +25,15 @@ if ! command -v systemd-run >/dev/null 2>&1 || ! systemctl --user show-environme
   exit 0
 fi
 
+unset CAR_SESSION_UNIT
 REAL_HOME="$HOME"
 SANDBOX="$(mktemp -d)"
 TAG="cartest$$"
 export HOME="$SANDBOX/home" XDG_CONFIG_HOME="$SANDBOX/home/.config"
 export CLAUDE_ROUTER_STOP_TIMEOUT=2
+# Off for every test but the one about it: several tests end a launch with an
+# error on purpose, and the switch would send the rest down the direct path.
+export CLAUDE_ROUTER_EARLY_FAILURE=0
 WORK="$SANDBOX/work"; OUT="$SANDBOX/out"
 mkdir -p "$HOME/.claude" "$XDG_CONFIG_HOME/claude-account-router" "$WORK" "$OUT"
 printf 'profile default ~/.claude\n' >"$XDG_CONFIG_HOME/claude-account-router/routes.conf"
@@ -189,6 +193,30 @@ outer_cg="$(cut -d: -f3 "/proc/$(cat "$OUT/outer.pid")/cgroup" 2>/dev/null)"
 kill -9 "$(cat "$OUT/outer.pid")"
 inner_gone() { [ "$(pgrep -fc "^$TAG-inner-main")" = 0 ]; }
 wait_until 8 inner_gone && ok "it died with the outer session" || no "the inner launch survived the outer session"
+
+no_signalled() { ! pgrep -f "^$TAG-signalled" >/dev/null; }
+head_ "11. A launch that fails at once turns the units off by itself"
+SWITCH="$XDG_CONFIG_HOME/claude-account-router/no-unit"
+rm -f "$SWITCH"
+( cd "$WORK" && CLAUDE_ROUTER_EARLY_FAILURE=15 "$ROUTER" bash -c 'exit 0' </dev/null )
+[ ! -e "$SWITCH" ] && ok "a launch that ends well leaves the units on" || no "a clean exit turned the units off"
+# A launch that the editor asked to stop is not a failure. The signal goes to the
+# router from outside, never from inside the unit: there the parent is the user
+# manager, and signalling it ends the whole desktop session.
+( cd "$WORK" && CLAUDE_ROUTER_EARLY_FAILURE=15 "$ROUTER" bash -c 'exec -a '"$TAG"'-signalled sleep 30' </dev/null >/dev/null 2>&1 ) &
+signalled() { pgrep -f "^$TAG-signalled" >/dev/null; }
+wait_until 8 signalled
+kill -TERM "$(pgrep -f "claude-account-router bash -c exec -a $TAG-signalled" | head -1)"
+wait_until 8 no_signalled
+[ ! -e "$SWITCH" ] && ok "a launch stopped by a signal leaves the units on" || no "a signalled stop wrote the switch"
+( cd "$WORK" && CLAUDE_ROUTER_EARLY_FAILURE=15 "$ROUTER" bash -c 'exit 3' </dev/null ); rc=$?
+[ "$rc" = 3 ] && [ -s "$SWITCH" ] && ok "exit 3 within seconds writes the switch, and still returns 3" \
+  || no "an early failure did not write the switch (rc=$rc)"
+got="$(cd "$WORK" && "$ROUTER" bash -c 'printf "%s" "${CAR_SESSION_UNIT-unset}"' </dev/null)"
+[ "$got" = unset ] && ok "the next launch is a direct one" || no "the next launch still used a unit: $got"
+rm -f "$SWITCH"
+got="$(cd "$WORK" && "$ROUTER" bash -c 'printf "%s" "${CAR_SESSION_UNIT-unset}"' </dev/null)"
+[[ "$got" == claude-session-* ]] && ok "removing the switch turns the units back on" || no "units did not come back: $got"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

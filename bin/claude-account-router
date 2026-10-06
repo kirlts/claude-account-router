@@ -141,10 +141,23 @@ Fix it with:  claude-account logout $profile   then log in with the right accoun
     car_log "no session unit ($reason) :: $PWD"
     exec "$@"
   fi
+  local began=$SECONDS
   car_run_in_session_unit "$@"; rc=$?
   if [ "$CAR_UNIT_STARTED" -eq 0 ]; then
     car_log "session unit did not start, launching directly :: $PWD"
     exec "$@"
+  fi
+  # The person on the other side works from the editor panel. If Claude does
+  # not open there, there is no panel left to ask for a fix from, so the switch
+  # that turns the units off cannot be something to type in a terminal. A launch
+  # that ends in an error within seconds, without having been asked to stop,
+  # writes the switch itself: the next launch is a direct one, as before units
+  # existed. It may be the unit's fault or not; a direct launch is safe either way.
+  if [ "$rc" -ne 0 ] && [ "$CAR_UNIT_SIGNALLED" -eq 0 ] \
+     && [ $((SECONDS - began)) -lt "$CAR_UNIT_EARLY_FAILURE" ]; then
+    printf '%s exit %s after %ss in %s\n' "$(date -Is)" "$rc" "$((SECONDS - began))" "$PWD" \
+      >"$CAR_CONFIG_HOME/no-unit" 2>/dev/null
+    car_log "launch in a unit ended with $rc after $((SECONDS - began))s: units turned off (rm $CAR_CONFIG_HOME/no-unit turns them back on) :: $PWD"
   fi
   exit "$rc"
 }
