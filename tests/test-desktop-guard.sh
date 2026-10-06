@@ -17,12 +17,14 @@ no() { printf '  \033[31mFAIL\033[0m %s\n' "$*"; fail=$((fail + 1)); }
 K="ki""ll"; PK="pk""ill"
 MANAGER="$(pgrep -u "$(id -u)" -xo systemd)"
 
-verdict() {  # $1 = tool, $2 = command or file text
-  python3 - "$1" "$2" <<'PY' | "$HOOKS" run >/dev/null 2>&1
+verdict() {  # $1 = tool, $2 = command or file text, [$3 = file path]
+  python3 - "$1" "$2" "${3:-}" <<'PY' | "$HOOKS" run >/dev/null 2>&1
 import json, sys
-tool, text = sys.argv[1], sys.argv[2]
+tool, text, path = sys.argv[1], sys.argv[2], sys.argv[3]
 key = "command" if tool == "Bash" else "content"
-print(json.dumps({"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": {key: text}, "session_id": "t"}))
+inp = {key: text}
+if path: inp["file_path"] = path
+print(json.dumps({"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": inp, "session_id": "t"}))
 PY
   echo $?
 }
@@ -66,6 +68,9 @@ allowed "git with a signal-like word"           "git log --grep='$K'"
 
 printf '\n\033[1mFiles\033[0m\n'
 [ "$(verdict Write "( $K -TERM \$PPID )")" = 2 ] && ok "a file that signals the parent is refused" || no "file was allowed"
+[ "$(verdict Write "( $K -TERM \$PPID )" /tmp/x.sh)" = 2 ] && ok "a script path is judged the same" || no "script was allowed"
+[ "$(verdict Write "Never run $K -TERM \$PPID: it ends the session." /tmp/CLAUDE.md)" = 0 ] \
+  && ok "prose that explains the rule is allowed" || no "prose was refused"
 [ "$(verdict Write "echo hello")" = 0 ] && ok "an ordinary file is allowed" || no "ordinary file refused"
 
 printf '\n\033[1mThe hook still works for other events\033[0m\n'

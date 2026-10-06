@@ -18,6 +18,7 @@ PROTECTED_COMM = {"kwin_wayland", "kwin_x11", "plasmashell", "startplasma-way", 
                   "sddm-helper", "dbus-broker", "dbus-daemon", "Xwayland", "gnome-shell"}
 SIGNALLERS = {"kill", "pkill", "killall", "skill", "pidwait"}
 POWER = {"poweroff", "reboot", "halt", "shutdown", "kexec"}
+PROSE = (".md", ".txt", ".rst", ".html", ".json")
 SHELL_WORDS = {"sudo", "doas", "env", "nohup", "setsid", "exec", "command", "time", "timeout", "nice", "ionice", "xargs"}
 
 MESSAGE = (
@@ -94,6 +95,9 @@ def judge(event):
     tool = event.get("tool_name") or ""
     data = event.get("tool_input") or {}
     if tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+        # Prose that explains the rule contains the phrase and executes nothing.
+        if str(data.get("file_path") or "").lower().endswith(PROSE):
+            return None
         text = " ".join(str(v) for v in data.values() if isinstance(v, str))
         if re.search(r"\bkill\b[^\n;|&]*\$\{?PPID\b", text):
             return "a file that signals $PPID"
