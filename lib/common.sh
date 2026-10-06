@@ -6,7 +6,7 @@
 # getting its path wrong makes the account check pass silently while checking
 # nothing.
 
-CAR_VERSION="1.4.0"
+CAR_VERSION="1.5.0"
 CAR_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/claude-account-router"
 CAR_CONFIG_FILE="${CLAUDE_ROUTER_CONFIG:-$CAR_CONFIG_HOME/routes.conf}"
 CAR_LOG_FILE="${CLAUDE_ROUTER_LOG:-$CAR_CONFIG_HOME/router.log}"
@@ -523,4 +523,96 @@ car_profile_names() {
   for p in "${!CAR_PROFILE_DIR[@]}"; do
     [ "$p" = "$CAR_DEFAULT_PROFILE" ] || printf '%s\n' "$p"
   done | sort
+}
+
+# ---------------------------------------------------------------------------
+# Session units
+#
+# The launched process becomes the main process of a transient systemd user
+# service. A process that leaves its parent with setsid, nohup or a double fork
+# is reparented to the user manager and its origin is lost, but it cannot leave
+# its cgroup: when the main process dies, for any reason and without warning,
+# systemd kills what is left in the unit. Nothing has to watch for it.
+# ---------------------------------------------------------------------------
+
+CAR_UNIT_STATE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/claude-account-router"
+# Seconds a stopped unit waits before SIGKILL. The main process needs this long
+# at most to shut down in order; a stray that ignores SIGTERM lasts no longer.
+CAR_UNIT_STOP_TIMEOUT="${CLAUDE_ROUTER_STOP_TIMEOUT:-10}"
+
+# Why a launch stays outside a unit, or nothing when a unit can hold it.
+car_unit_unavailable_reason() {
+  if [ "${CLAUDE_ROUTER_NO_UNIT:-}" = 1 ]; then printf 'CLAUDE_ROUTER_NO_UNIT=1'; return; fi
+  if [ -e "$CAR_CONFIG_HOME/no-unit" ]; then printf '%s exists' "$CAR_CONFIG_HOME/no-unit"; return; fi
+  # --pipe hands the caller's descriptors to the service, and a service process
+  # cannot become the foreground process of a terminal.
+  if [ -t 0 ]; then printf 'stdin is a terminal'; return; fi
+  if ! command -v systemd-run >/dev/null 2>&1; then printf 'systemd-run not found'; return; fi
+  if ! systemctl --user show-environment >/dev/null 2>&1; then printf 'no systemd user manager'; return; fi
+}
+
+# One --setenv per exported variable. A transient service starts from the user
+# manager's environment, not the caller's, so CLAUDE_CONFIG_DIR and everything
+# else the launch depends on has to be named.
+car_unit_env_args() {  # prints one argument per line
+  local v
+  for v in $(compgen -e); do
+    case "$v" in
+      CAR_SESSION_UNIT|INVOCATION_ID|JOURNAL_STREAM|SYSTEMD_EXEC_PID|MANAGERPID|NOTIFY_SOCKET|LISTEN_*|MAINPID) continue ;;
+    esac
+    [[ "$v" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    printf -- '--setenv=%s\n' "$v"
+  done
+}
+
+# Run "$@" as the main process of a session unit and return its exit status.
+# Sets CAR_UNIT_STARTED to 0 when the unit never started, so the caller can
+# launch directly: a broken user manager must not be the reason Claude does not
+# open. A variable and not a reserved status, because any status can be the
+# launched command's own.
+car_run_in_session_unit() {
+  local unit started cli rc touch_bin
+  local -a env_args=() bind=()
+  CAR_UNIT_STARTED=0
+  unit="claude-session-$$-$(date +%s)"
+  mkdir -p "$CAR_UNIT_STATE" 2>/dev/null || return 1
+  started="$CAR_UNIT_STATE/$unit.started"
+  touch_bin="$(command -v touch)" || return 1
+  mapfile -t env_args < <(car_unit_env_args)
+
+  # A router started from inside a session belongs to that session.
+  if [ -n "${CAR_SESSION_UNIT:-}" ] && systemctl --user is-active --quiet "$CAR_SESSION_UNIT"; then
+    bind=(-p "BindsTo=$CAR_SESSION_UNIT")
+  fi
+
+  # systemd-run does not forward SIGTERM or SIGINT to the unit: measured, the
+  # service kept running after its client was signalled. The editor closes a
+  # session by signalling this process, so the signal has to become a stop.
+  # shellcheck disable=SC2064
+  trap "systemctl --user stop '$unit.service' 2>/dev/null" TERM INT HUP
+
+  # --expand-environment=no: by default the service manager rewrites ${NAME} and
+  # $NAME inside the arguments, so a prompt that mentions a variable would
+  # reach Claude changed.
+  systemd-run --user --pipe --wait --collect --quiet --unit="$unit" \
+    --expand-environment=no \
+    -p "TimeoutStopSec=$CAR_UNIT_STOP_TIMEOUT" \
+    -p "ExecStartPre=$touch_bin $started" \
+    "${bind[@]}" --working-directory="$PWD" \
+    "${env_args[@]}" --setenv=CAR_SESSION_UNIT="$unit.service" \
+    -- "$@" &
+  cli=$!
+  # A trapped signal interrupts wait with a status above 128 while the client
+  # is still running; waiting again returns the real exit status.
+  while :; do
+    wait "$cli"; rc=$?
+    kill -0 "$cli" 2>/dev/null || break
+  done
+  trap - TERM INT HUP
+
+  if [ -e "$started" ]; then
+    rm -f "$started"
+    CAR_UNIT_STARTED=1
+  fi
+  return "$rc"
 }

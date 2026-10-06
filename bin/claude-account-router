@@ -131,7 +131,22 @@ Fix it with:  claude-account logout $profile   then log in with the right accoun
   # origin marks who invoked the router, so the checker can tell real editor use
   # apart from its own probes.
   car_log "$profile :: origin=${CLAUDE_ROUTER_ORIGIN:-extension} :: $PWD :: $dir :: $email"
-  exec "$@"
+
+  # The account is verified above. From here the only question is where the
+  # process runs: inside a session unit, so that everything it starts dies with
+  # it, or directly when no unit can hold it. Either way the account is the same.
+  local reason rc
+  reason="$(car_unit_unavailable_reason)"
+  if [ -n "$reason" ]; then
+    car_log "no session unit ($reason) :: $PWD"
+    exec "$@"
+  fi
+  car_run_in_session_unit "$@"; rc=$?
+  if [ "$CAR_UNIT_STARTED" -eq 0 ]; then
+    car_log "session unit did not start, launching directly :: $PWD"
+    exec "$@"
+  fi
+  exit "$rc"
 }
 
 case "${1:-}" in

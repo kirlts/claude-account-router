@@ -158,6 +158,7 @@ The gap that remains: a folder whose routing changed and that you have not opene
 | `claude-account unmark [dir]` | Remove that marker |
 | `claude-account isolate [--apply]` | Give each profile its own memory and history, and keep each folder's history visible |
 | `claude-account-router --init` | Write a starter config |
+| `claude-session on-end`, `detach`, `status` | Bind work to the session, or release it from it |
 
 `logout` never deletes without a backup. Credentials move to `~/.config/claude-account-router/backups/`.
 
@@ -201,7 +202,33 @@ Once registered, it runs as a hook of its own on every event and applies the hoo
 
 Only repositories claimed by a `route` in `routes.conf` are trusted. Looking at a repository you never declared never executes its hooks. `install --replace <command>` removes an older hook entry in the same pass. It keeps a backup of each settings file it changes and does nothing when everything is already registered.
 
+## What a session starts dies with it
+
+The router launches Claude as the main process of a transient systemd user unit, `claude-session-<pid>-<time>.service`. A process that leaves its parent with `setsid`, `nohup` or a double fork loses its parent but not its cgroup, so when the Claude process ends, for any reason, systemd stops everything the session started. Nothing watches for it and nothing has to be kept running. Measured with a real session that left a detached `sleep` behind through its Bash tool: alive after a direct launch, gone after a launch in a unit.
+
+Two things need more than the cgroup, and `claude-session` covers them:
+
+| Command | What it does |
+|---|---|
+| `claude-session on-end <name> -- <command>` | Runs the command once, when the session ends, however it ends. For what a daemon holds on the session's behalf: containers, compose stacks |
+| `claude-session detach <name> --max <duration> -- <command>` | Runs the command in a unit of its own, so it outlives the session. `--max` is required |
+| `claude-session status` | The session unit, what is registered for its end, what is detached |
+
+`on-end` holds no process: it is a unit that stays active after `true` and is bound to the session unit, and stopping it is what runs the command. Inside a session, `CAR_SESSION_UNIT` names the session unit.
+
+The account check runs before any of this, so a launch in a unit and a direct launch use the same verified account. The router launches directly, and logs why, when stdin is a terminal, when there is no systemd user manager, when the unit does not start, when `CLAUDE_ROUTER_NO_UNIT=1` is set, or when `~/.config/claude-account-router/no-unit` exists. That file is the switch to turn the units off without editing anything else:
+
+```bash
+touch ~/.config/claude-account-router/no-unit
+```
+
 ## Known limits
+
+**A session unit covers launches through the router only.** `claude` typed in a terminal does not go through `claudeProcessWrapper`, and a terminal launch through the router runs directly, because a service cannot own the terminal.
+
+**Killing the router with SIGKILL leaves the session running** for as long as the editor keeps its pipes open. SIGTERM, SIGINT and SIGHUP stop the unit. `systemd-run` forwards none of them on its own, so the router turns them into a stop.
+
+**`on-end` does not run on a power cut.** Transient units do not survive a reboot. What a daemon still holds afterwards has to be reconciled by whoever asks for it next.
 
 **The wrapper is honored by the process, not by the editor.** The router affects the Claude process the extension launches. The editor process itself runs outside it, which has two consequences. `Claude Code: Logout` from the panel can act on the default config dir rather than the profile you are in, so use `claude-account logout <profile>`, which names the directory explicitly. And the panel reads every folder's past sessions from the default config dir, which is why isolated history needs the link described above.
 
@@ -222,7 +249,10 @@ new path, because the marker lives inside the folder that changed name.
 ```bash
 ./tests/test-routing.sh
 ./tests/test-foreign-hooks.sh
+./tests/test-session-unit.sh
 ```
+
+`test-session-unit.sh` needs a systemd user manager and reports itself skipped without one. It kills a stand-in session with SIGKILL and counts what is left, including a process that ignores SIGTERM.
 
 Forty end to end cases against a throwaway `HOME`: routing by path, by subfolder, by deeply nested subfolder, through a symlink, by worktree outside the repo tree, fallback to default, the marker commands including that they preserve pre-existing settings, the isolation of memory and history, the links that keep it visible by folder, and five fail closed paths (wrong account for a profile, an account leaking into the default profile, unreadable identity, missing config dir, missing config file). One case asserts that a profile with no session still starts, since otherwise the first login would be impossible.
 

@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# claude-session: bind work to the Claude session that started it, or release it.
+#
+# A session launched through claude-account-router runs inside a systemd unit,
+# and every process it starts dies with it. Two things need more than that:
+#
+#   claude-session on-end <name> [--timeout <seconds>] -- <command> [args...]
+#       Run <command> once, when this session ends, however it ends. For what
+#       the session created outside its own processes: containers, stacks,
+#       anything a daemon holds. No process waits for it.
+#
+#   claude-session detach <name> --max <duration> [--log <file>] -- <command> [args...]
+#       Run <command> in a unit of its own, so it outlives the session. For a
+#       deployment or a test run that must finish even if the session does not.
+#       --max is required: nothing started here lives without a limit.
+#
+#   claude-session status
+#       The session unit, what is registered to run at its end, and what is
+#       detached.
+#
+# Exit status: 3 when on-end is called outside a session unit, 4 when systemd
+# cannot hold the unit. A caller that also runs elsewhere decides what that means.
+
+set -uo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+LIB="$(dirname "$(dirname "$SELF")")/lib/common.sh"
+[ -f "$LIB" ] || { printf 'Cannot find the router library at: %s\n' "$LIB" >&2; exit 1; }
+# shellcheck source=../lib/common.sh
+. "$LIB"
+
+usage() { sed -n '2,23p' "$SELF" | sed 's/^# \{0,1\}//'; }
+fail()  { printf 'claude-session: %s\n' "$2" >&2; exit "$1"; }
+
+valid_name() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; }
+
+need_systemd() {
+  command -v systemd-run >/dev/null 2>&1 || fail 4 "systemd-run not found"
+  systemctl --user show-environment >/dev/null 2>&1 || fail 4 "no systemd user manager"
+}
+
+# The command goes to a file because ExecStop= is parsed by systemd with its own
+# quoting rules, and a command line rebuilt for it is where arguments get lost.
+write_script() {  # $1 = file, rest = command
+  local file="$1"; shift
+  mkdir -p "$(dirname "$file")" || return 1
+  { printf '#!/usr/bin/env bash\ncd %q || exit 1\nexec' "$PWD"; printf ' %q' "$@"; printf '\n'; } >"$file"
+  chmod +x "$file"
+}
+
+cmd_on_end() {
+  local name="${1:-}" timeout="" session unit script
+  local -a env_args=() extra=()
+  [ $# -gt 0 ] && shift
+  valid_name "$name" || fail 64 "on-end needs a name made of letters, digits, dot, dash or underscore"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --timeout) timeout="${2:-}"; shift 2 ;;
+      --) shift; break ;;
+      *) fail 64 "unexpected argument before --: $1" ;;
+    esac
+  done
+  [ $# -gt 0 ] || fail 64 "on-end needs a command after --"
+
+  session="${CAR_SESSION_UNIT:-}"
+  [ -n "$session" ] || fail 3 "not inside a session unit (CAR_SESSION_UNIT is unset)"
+  need_systemd
+  systemctl --user is-active --quiet "$session" || fail 3 "the session unit $session is not active"
+
+  unit="${session%.service}-end-$name"
+  script="$CAR_UNIT_STATE/on-end/$unit.sh"
+  write_script "$script" "$@" || fail 1 "cannot write $script"
+  # Registering the same name again replaces the command and keeps the unit.
+  systemctl --user is-active --quiet "$unit.service" && return 0
+
+  [ -n "$timeout" ] && extra=(-p "TimeoutStopSec=$timeout")
+  mapfile -t env_args < <(car_unit_env_args)
+  # A oneshot that stays active after /bin/true holds no process. BindsTo stops
+  # it when the session unit goes away, and stopping it is what runs the command.
+  # No After=: with it a polite stop of the session would wait for this command
+  # before letting the session's own process exit.
+  systemd-run --user --quiet --collect --unit="$unit" --expand-environment=no \
+    -p Type=oneshot -p RemainAfterExit=yes -p "BindsTo=$session" \
+    -p "ExecStop=$script" -p "ExecStopPost=$(command -v rm) -f $script" \
+    "${extra[@]}" "${env_args[@]}" --setenv=CAR_SESSION_UNIT="$session" \
+    -- "$(command -v true)" || fail 4 "systemd did not accept the unit $unit"
+}
+
+cmd_detach() {
+  local name="${1:-}" max="" log="" unit
+  local -a env_args=() extra=()
+  [ $# -gt 0 ] && shift
+  valid_name "$name" || fail 64 "detach needs a name made of letters, digits, dot, dash or underscore"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --max) max="${2:-}"; shift 2 ;;
+      --log) log="${2:-}"; shift 2 ;;
+      --) shift; break ;;
+      *) fail 64 "unexpected argument before --: $1" ;;
+    esac
+  done
+  [ -n "$max" ] || fail 64 "detach needs --max <duration>, for example --max 2h"
+  [ $# -gt 0 ] || fail 64 "detach needs a command after --"
+  need_systemd
+
+  unit="claude-detached-$name-$(date +%s)-$$"
+  if [ -n "$log" ]; then
+    log="$(readlink -f "$log")"
+    extra=(-p "StandardOutput=append:$log" -p "StandardError=append:$log")
+  fi
+  mapfile -t env_args < <(car_unit_env_args)
+  systemd-run --user --quiet --collect --unit="$unit" --expand-environment=no \
+    -p "RuntimeMaxSec=$max" "${extra[@]}" --working-directory="$PWD" \
+    "${env_args[@]}" -- "$@" || fail 4 "systemd did not accept the unit $unit"
+  printf '%s.service\n' "$unit"
+}
+
+cmd_status() {
+  need_systemd
+  if [ -n "${CAR_SESSION_UNIT:-}" ]; then
+    printf 'session unit: %s (%s)\n' "$CAR_SESSION_UNIT" "$(systemctl --user is-active "$CAR_SESSION_UNIT")"
+  else
+    printf 'session unit: none (this process was not started through the router)\n'
+  fi
+  systemctl --user list-units --all --no-legend --plain 'claude-session-*' 'claude-detached-*' \
+    | awk '{ printf "  %-58s %s %s\n", $1, $3, $4 }'
+}
+
+case "${1:-}" in
+  on-end) shift; cmd_on_end "$@" ;;
+  detach) shift; cmd_detach "$@" ;;
+  status) shift; cmd_status ;;
+  --help|-h|'') usage ;;
+  *) fail 64 "unknown command: $1. Try: claude-session --help" ;;
+esac

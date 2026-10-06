@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The router launches Claude as the main process of a transient systemd user unit. Everything the
+  session starts stays in that unit's cgroup and is stopped when the Claude process ends, with or
+  without warning. It replaces a watcher that had to be kept running: a watcher script was found
+  alive 58 hours after its session, next to 152 stray `tail -f /dev/null` and three dev servers.
+- `claude-session on-end` runs a command once when the session ends, for containers and stacks a
+  daemon holds outside the session's cgroup. It holds no process.
+- `claude-session detach` runs a command in a unit of its own, with a required `--max`, for work
+  that must finish even if the session does not.
+- `CLAUDE_ROUTER_NO_UNIT=1` and `~/.config/claude-account-router/no-unit` launch directly. So does
+  a unit that fails to start: a broken user manager is not a reason for Claude not to open.
+
+### Tests
+
+- `test-session-unit.sh`, 25 checks against real units. Two of them exist because of defects found
+  while building this: `systemd-run` does not forward SIGTERM to the unit, and the service manager
+  expands `${NAME}` inside the command's arguments unless `--expand-environment=no` is passed. The
+  second one was caught by `test-routing.sh`, eight of whose cases read a variable in the command.
+
 ### Fixed
 
 - A window marker already tracked by git is taken out of the index by `mark`, and left on disk.
