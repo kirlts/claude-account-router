@@ -214,7 +214,7 @@ Two things need more than the cgroup, and `claude-session` covers them:
 | `claude-session detach <name> --max <duration> -- <command>` | Runs the command in a unit of its own, so it outlives the session. `--max` is required |
 | `claude-session status` | The session unit, what is registered for its end, what is detached |
 
-`on-end` holds no process: it is a unit that stays active after `true` and is bound to the session unit, and stopping it is what runs the command. Inside a session, `CAR_SESSION_UNIT` names the session unit.
+`on-end` holds no process: it is a unit that stays active after `true` and is bound to the session unit, and stopping it is what runs the command. The command runs after the session's processes are gone, so a cleanup that checks whether its owner is alive finds it dead. Inside a session, `CAR_SESSION_UNIT` names the session unit.
 
 The account check runs before any of this, so a launch in a unit and a direct launch use the same verified account. The router launches directly, and logs why, when stdin is a terminal, when there is no systemd user manager, when the unit does not start, when `CLAUDE_ROUTER_NO_UNIT=1` is set, or when `~/.config/claude-account-router/no-unit` exists. That file is the switch to turn the units off without editing anything else:
 

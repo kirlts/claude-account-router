@@ -22,8 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
-- `test-session-unit.sh`, 25 checks against real units. Two of them exist because of defects found
-  while building this: `systemd-run` does not forward SIGTERM to the unit, and the service manager
+- `test-session-unit.sh`, 27 checks against real units. Three of them exist because of defects found
+  while building this: `systemd-run` does not forward SIGTERM to the unit, an `on-end` command ran
+  while a politely stopped session was still alive until it was ordered `Before=` it, and the service manager
   expands `${NAME}` inside the command's arguments unless `--expand-environment=no` is passed. The
   second one was caught by `test-routing.sh`, eight of whose cases read a variable in the command.
 

@@ -77,10 +77,12 @@ cmd_on_end() {
   mapfile -t env_args < <(car_unit_env_args)
   # A oneshot that stays active after /bin/true holds no process. BindsTo stops
   # it when the session unit goes away, and stopping it is what runs the command.
-  # No After=: with it a polite stop of the session would wait for this command
-  # before letting the session's own process exit.
+  # Before=, because units stop in the reverse of their start order: the command
+  # runs once the session's processes are gone. A cleanup that asks "is the owner
+  # still alive?" would otherwise find it alive during a polite stop, and leave
+  # everything in place.
   systemd-run --user --quiet --collect --unit="$unit" --expand-environment=no \
-    -p Type=oneshot -p RemainAfterExit=yes -p "BindsTo=$session" \
+    -p Type=oneshot -p RemainAfterExit=yes -p "BindsTo=$session" -p "Before=$session" \
     -p "ExecStop=$script" -p "ExecStopPost=$(command -v rm) -f $script" \
     "${extra[@]}" "${env_args[@]}" --setenv=CAR_SESSION_UNIT="$session" \
     -- "$(command -v true)" || fail 4 "systemd did not accept the unit $unit"

@@ -69,6 +69,12 @@ nohup bash -c "exec -a $t-nohup tail -f /dev/null" </dev/null >/dev/null 2>&1 &
 bash -c "trap '' TERM; exec -a $t-stubborn sleep 9004" &
 [ $# -gt 0 ] && "$@"
 printf '%s\n' "$$" >"$out/$id.pid"
+if [ -n "${CARTEST_SLOW_EXIT:-}" ]; then
+  # A session that takes a second to shut down, as a real one does.
+  trap 'sleep 1; exit 0' TERM
+  sleep 9000 & wait
+  wait
+fi
 exec -a "$t-main" sleep 9000
 EOF
 chmod +x "$SANDBOX/fake-session"
@@ -136,6 +142,23 @@ kill -9 "$(cat "$OUT/onend.pid")"
 wait_until 8 test -e "$OUT/onend.ran" && ok "it ran after SIGKILL of the session" || no "it never ran"
 left="$(systemctl --user list-units --all --no-legend --plain 'claude-session-*-end-mark*' | wc -l)"
 [ "$left" = 0 ] && ok "its unit is gone" || no "$left on-end unit(s) left"
+
+# The command records whether the session's main process was still there. A
+# cleanup keyed on a live owner does nothing if it runs too early.
+cat >"$SANDBOX/owner-state" <<'EOF2'
+#!/usr/bin/env bash
+kill -0 "$(cat "$1")" 2>/dev/null && echo alive >"$2" || echo gone >"$2"
+EOF2
+chmod +x "$SANDBOX/owner-state"
+for how in kill term; do
+  id="order$how"
+  CARTEST_SLOW_EXIT=1 launch "$id" "$SESSION" on-end order -- "$SANDBOX/owner-state" "$OUT/$id.pid" "$OUT/$id.state"
+  if [ "$how" = kill ]; then kill -9 "$(cat "$OUT/$id.pid")"
+  else kill -TERM "$(pgrep -f "claude-account-router $SANDBOX/fake-session $id " | head -1)"; fi
+  wait_until 10 test -s "$OUT/$id.state"
+  [ "$(cat "$OUT/$id.state" 2>/dev/null)" = gone ] && ok "after a $how, it runs once the session's process is gone" \
+    || no "after a $how, it ran with the session's process '$(cat "$OUT/$id.state" 2>/dev/null)'"
+done
 
 head_ "8. on-end outside a session says so"
 ( unset CAR_SESSION_UNIT; "$SESSION" on-end x -- true ) 2>/dev/null; rc=$?
