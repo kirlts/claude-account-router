@@ -222,6 +222,10 @@ The account check runs before any of this, so a launch in a unit and a direct la
 touch ~/.config/claude-account-router/no-unit
 ```
 
+## Commands that could end the session are refused
+
+`claude-account-hooks run` refuses, before the tool runs, a Bash command or a file that can end the whole desktop session: a signal to `$PPID` (inside a session unit that is the systemd user manager), to the user manager, to pid 1, to `-1`, to the desktop or the editor by pid or by pattern, `systemctl --user exit`, `loginctl terminate-user`, power off and reboot. The verdict comes from the command text and the live process table, so a script that does it internally is not covered: tests that signal must name the pid they started.
+
 ## Known limits
 
 **A session unit covers launches through the router only.** `claude` typed in a terminal does not go through `claudeProcessWrapper`, and a terminal launch through the router runs directly, because a service cannot own the terminal.
@@ -250,6 +254,7 @@ new path, because the marker lives inside the folder that changed name.
 ./tests/test-routing.sh
 ./tests/test-foreign-hooks.sh
 ./tests/test-session-unit.sh
+./tests/test-desktop-guard.sh
 ```
 
 `test-session-unit.sh` needs a systemd user manager and reports itself skipped without one. It kills a stand-in session with SIGKILL and counts what is left, including a process that ignores SIGTERM.

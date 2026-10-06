@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A desktop guard in `claude-account-hooks run`, ahead of everything else, refuses a Bash command or
+  a file that can end the whole desktop session: a signal to `$PPID`, to the systemd user manager, to
+  pid 1, to `-1`, to the desktop or the editor by pid or by pattern, `systemctl --user exit`,
+  `loginctl terminate-user`, power off and reboot. Found when a test inside a session unit signalled
+  `$PPID`, which there is the user manager, and the manager stopped KDE, VS Code and every Claude
+  session. The verdict comes from the command text and the live process table; nothing is run.
+- A launch that ends in an error within 15 seconds, without a signal, writes
+  `~/.config/claude-account-router/no-unit`, so the next launch is a direct one. The person works
+  from the editor panel and cannot be asked to type a command there.
+
 - The router launches Claude as the main process of a transient systemd user unit. Everything the
   session starts stays in that unit's cgroup and is stopped when the Claude process ends, with or
   without warning. It replaces a watcher that had to be kept running: a watcher script was found
@@ -22,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
-- `test-session-unit.sh`, 27 checks against real units. Three of them exist because of defects found
+- `test-session-unit.sh`, 32 checks against real units. Four of them exist because of defects found
   while building this: `systemd-run` does not forward SIGTERM to the unit, an `on-end` command ran
   while a politely stopped session was still alive until it was ordered `Before=` it, and the service manager
   expands `${NAME}` inside the command's arguments unless `--expand-environment=no` is passed. The

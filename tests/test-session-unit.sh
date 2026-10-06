@@ -129,7 +129,10 @@ wait_until 8 no_strays term && ok "none left after SIGTERM to the router" \
 
 head_ "5. CLAUDE_ROUTER_NO_UNIT=1 launches directly"
 got="$(cd "$WORK" && CLAUDE_ROUTER_NO_UNIT=1 "$ROUTER" bash -c 'printf "%s|%s" "${CAR_SESSION_UNIT-unset}" "$(cut -d: -f3 /proc/self/cgroup)"' </dev/null)"
-[[ "$got" == unset\|* ]] && [[ "$got" != *claude-session-* ]] && ok "no unit, same command" || no "switch ignored: $got"
+# A direct launch stays in the cgroup of whoever ran it, which is a session unit when this
+# file runs inside a Claude session, so the comparison is against the caller's own.
+own_cg="$(cut -d: -f3 /proc/self/cgroup)"
+[[ "$got" == unset\|"$own_cg" ]] && ok "no unit, same command" || no "switch ignored: $got"
 grep -q 'no session unit (CLAUDE_ROUTER_NO_UNIT=1)' "$LOG" && ok "the log says why" || no "the log does not say why"
 
 head_ "6. A unit that cannot start does not stop the launch"
