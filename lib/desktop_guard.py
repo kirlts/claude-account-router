@@ -15,7 +15,7 @@ import shlex
 # Processes whose death ends the session. The user manager is the one named `systemd` that is
 # not pid 1 and belongs to this user. The editor's main process is the one under the manager.
 PROTECTED_COMM = {"kwin_wayland", "kwin_x11", "plasmashell", "startplasma-way", "sddm",
-                  "sddm-helper", "dbus-broker", "dbus-daemon", "Xwayland", "gnome-shell"}
+                  "sddm-helper", "plasma-login", "plasmalogin", "ksmserver", "dbus-broker", "dbus-daemon", "Xwayland", "gnome-shell"}
 SIGNALLERS = {"kill", "pkill", "killall", "skill", "pidwait"}
 POWER = {"poweroff", "reboot", "halt", "shutdown", "kexec"}
 PROSE = (".md", ".txt", ".rst", ".html", ".json")
@@ -26,6 +26,7 @@ MESSAGE = (
     "Signalling the systemd user manager, the desktop, the editor or a parent shell closes every "
     "Claude session and everything the person has open.\n"
     "Signal only a process this command started itself, by the pid it printed, never by $PPID, "
+    "by a pid derived from the parent of another process (an orphan's parent is the user manager), "
     "by -1, or by a pattern that can match system processes. To stop a unit use "
     "`systemctl --user stop <unit>`."
 )
@@ -67,6 +68,35 @@ def protected():
     return found, table
 
 
+# The parent of another process, computed instead of written down. A process whose parent died
+# is adopted by the user manager, so the "parent" of an orphan is the manager itself.
+PARENT_OF = [
+    r"\bps\b[^\n]*\bppid\b",                                   # ps -o ppid= -p N, ps -eo pid,ppid
+    r"/proc/[^\s/]+/(?:stat|status)\b",                           # /proc/N/stat, /proc/N/status
+    r"\bPPid\b",                                                 # the status field, grep or awk
+    r"\bps\b[^\n]*\|[^\n]*\bawk\b[^\n]*\$[34]\b",              # ps -ef | awk '{print $3}'
+    r"\bps\b[^\n]*\|[^\n]*\bcut\b[^\n]*-f\s*[34]\b",
+    r"\bstat\b[^\n]*(?:%P\b|--format)[^\n]*/proc",
+    r"\bpstree\b[^\n]*-[A-Za-z]*s",                            # pstree -s: the ancestors
+]
+DYNAMIC_ARG = re.compile(r"[$`]|\bxargs\b")
+
+
+def signals_computed_parent(command):
+    """True when the command derives a parent pid and hands something computed to a signaller."""
+    if not any(re.search(rx, command) for rx in PARENT_OF):
+        return False
+    for seg in re.split(r"(?:\|\||&&|;|\n)", command):
+        words = re.findall(r"[^\s|()]+", seg)
+        for i, w in enumerate(words):
+            if os.path.basename(w) in SIGNALLERS:
+                tail = " ".join(words[i + 1:])
+                head = " ".join(words[:i])
+                if DYNAMIC_ARG.search(tail) or "xargs" in head:
+                    return True
+    return False
+
+
 def _segments(command):
     """Each simple command as a list of words; quoting survives, substitutions stay as text."""
     segs = []
@@ -101,12 +131,17 @@ def judge(event):
         text = " ".join(str(v) for v in data.values() if isinstance(v, str))
         if re.search(r"\bkill\b[^\n;|&]*\$\{?PPID\b", text):
             return "a file that signals $PPID"
+        if signals_computed_parent(text):
+            return "a file that signals a pid computed from a parent"
         return None
     if tool != "Bash":
         return None
     command = data.get("command") or ""
     if re.search(r"\bkill\b[^\n;|&]*\$\{?PPID\b", command):
         return "it signals $PPID"
+
+    if signals_computed_parent(command):
+        return "it signals a pid computed from the parent of another process"
 
     prot, table = protected()
     for words in _segments(command):

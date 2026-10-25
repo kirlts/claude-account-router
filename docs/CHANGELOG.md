@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A runtime signal guard (`lib/kill_guard.py`, a `kill` function loaded from `~/.bashrc`, and shims for
+  `kill`, `pkill` and `killall`) that refuses pid 1, the user manager, the ancestors of the shell, the
+  desktop processes, their process groups and `-1`, and fails closed. The static guard also refuses a
+  signal whose target is computed from the parent of another process. Found on 2026-10-24 23:49:28,
+  when a subagent signalled the parent of an orphaned `timeout`, which was the user manager (pid 1620).
 - A desktop guard in `claude-account-hooks run`, ahead of everything else, refuses a Bash command or
   a file that can end the whole desktop session: a signal to `$PPID`, to the systemd user manager, to
   pid 1, to `-1`, to the desktop or the editor by pid or by pattern, `systemctl --user exit`,

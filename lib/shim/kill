@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Runtime guard in front of /usr/bin/kill: see lib/kill_guard.py. Fails closed.
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)"
+python3 -I "$ROOT/lib/kill_guard.py" kill "$@" || exit 1
+for d in /usr/bin /bin; do [ -x "$d/kill" ] && exec "$d/kill" "$@"; done; echo 'kill: no system kill found' >&2; exit 127

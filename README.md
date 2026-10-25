@@ -224,7 +224,14 @@ touch ~/.config/claude-account-router/no-unit
 
 ## Commands that could end the session are refused
 
-`claude-account-hooks run` refuses, before the tool runs, a Bash command or a file that can end the whole desktop session: a signal to `$PPID` (inside a session unit that is the systemd user manager), to the user manager, to pid 1, to `-1`, to the desktop or the editor by pid or by pattern, `systemctl --user exit`, `loginctl terminate-user`, power off and reboot. The verdict comes from the command text and the live process table, so a script that does it internally is not covered: tests that signal must name the pid they started.
+`claude-account-hooks run` refuses, before the tool runs, a Bash command or a file that can end the whole desktop session: a signal to `$PPID` (inside a session unit that is the systemd user manager), to the user manager, to pid 1, to `-1`, to the desktop or the editor by pid or by pattern, `systemctl --user exit`, `loginctl terminate-user`, power off and reboot. The verdict comes from the command text and the live process table, so a script that does it internally is not covered by this layer, which is why there is a second one below.
+
+**A pid computed at run time.** On 2026-10-24 23:49:28 a subagent ran `pp=$(ps -o ppid= -p 2241050 | tr -d ' '); <signal> $pp; ...`. Process 2241050 was an orphaned `timeout`, adopted by the user manager (pid 1620), so `$pp` was 1620. The journal shows `systemd[1620]: Activating special unit exit.target` right after the auditd record (key `hpomen_senal`), and KDE, VS Code and every Claude session closed. Two layers now stop it:
+
+1. Static: a command that derives the parent of another process (`ps -o ppid`, `/proc/<pid>/stat` or `status`, the `PPid` field, `ps -ef | awk '{print $3}'`, `pstree -s`) and passes something computed (`$var`, `$(...)`, `xargs`) to `kill`, `pkill`, `killall` or `skill` is refused. A literal pid stays allowed.
+2. Runtime, which holds whatever the text looked like: `lib/kill_guard.py` resolves the real pids when the signal is about to be sent and refuses pid 1, the systemd user manager, every ancestor of the calling shell, the desktop processes, a process group that holds any of them, `-1`, and anything it cannot read (it fails closed). It runs from a `kill` shell function that `install.sh` loads from `~/.bashrc` (Claude Code builds its shell snapshot from the user's shell, so every Bash tool call gets it) and from shims for `kill`, `pkill` and `killall` in `~/.local/bin`, which also cover `command pkill` and `/usr/bin/kill` by PATH. A process the command started itself is still signalled.
+
+`./tests/test-kill-guard.sh` checks it with stand-in processes and a stand-in manager (`CAR_GUARD_MANAGER_PID`), never with a signal to a real desktop process, and includes a sabotage case: with the guard off, the same scenario kills the stand-in.
 
 ## Known limits
 
@@ -255,6 +262,7 @@ new path, because the marker lives inside the folder that changed name.
 ./tests/test-foreign-hooks.sh
 ./tests/test-session-unit.sh
 ./tests/test-desktop-guard.sh
+./tests/test-kill-guard.sh
 ```
 
 `test-session-unit.sh` needs a systemd user manager and reports itself skipped without one. It kills a stand-in session with SIGKILL and counts what is left, including a process that ignores SIGTERM.

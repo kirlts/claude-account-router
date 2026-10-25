@@ -19,6 +19,10 @@ dim()   { printf '\033[90m%s\033[0m\n' "$*"; }
 bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
 
 if [ "${1:-}" = "--uninstall" ]; then
+  rm -f "$CONFIG_HOME/kill_guard.sh"
+  for c in kill pkill killall; do
+    if [ -L "$PREFIX/$c" ]; then rm -f "$PREFIX/$c"; dim "removed $PREFIX/$c"; fi
+  done
   for c in "${COMMANDS[@]}"; do
     if [ -L "$PREFIX/$c" ]; then rm -f "$PREFIX/$c"; dim "removed $PREFIX/$c"; fi
   done
@@ -37,7 +41,17 @@ for c in "${COMMANDS[@]}"; do
   dim "linked $PREFIX/$c"
 done
 
+# Runtime signal guard: shims in front of kill, pkill and killall, and a `kill` function that
+# ~/.bashrc loads (Claude Code builds its shell snapshot from the user's shell).
+for c in kill pkill killall; do
+  chmod +x "$ROOT/lib/shim/$c"
+  ln -sfn "$ROOT/lib/shim/$c" "$PREFIX/$c"
+  dim "linked $PREFIX/$c (signal guard)"
+done
 mkdir -p "$CONFIG_HOME"
+sed "s|@ROOT@|$ROOT|" "$ROOT/lib/kill_guard.sh" > "$CONFIG_HOME/kill_guard.sh"
+BASHRC_LINE='[ -r "${XDG_CONFIG_HOME:-$HOME/.config}/claude-account-router/kill_guard.sh" ] && . "${XDG_CONFIG_HOME:-$HOME/.config}/claude-account-router/kill_guard.sh"  # claude-account-router signal guard'
+grep -qF 'claude-account-router signal guard' "$HOME/.bashrc" 2>/dev/null || printf '\n%s\n' "$BASHRC_LINE" >> "$HOME/.bashrc"
 if [ ! -e "$CONFIG_HOME/routes.conf" ]; then
   cp "$ROOT/examples/routes.conf.example" "$CONFIG_HOME/routes.conf"
   green "Created $CONFIG_HOME/routes.conf from the example"

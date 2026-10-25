@@ -56,6 +56,13 @@ refused "power off"                             "systemctl poweroff"
 refused "reboot"                                "reboot"
 refused "after a timeout prefix"                "timeout 5 $K -TERM $MANAGER"
 
+refused "pid from ps ppid, then a signal"        "pp=\$(ps -o ppid= -p 4242 | tr -d ' '); $K \$pp; $K 4243 4242"
+refused "ps ppid inside the substitution"        "$K \$(ps -o ppid= -p 4242)"
+refused "PPid field of /proc status, xargs"      "awk '/PPid/{print \$2}' /proc/4242/status | xargs $K"
+refused "ps -ef parent column, xargs"            "ps -ef | awk '{print \$3}' | xargs $K -9"
+refused "stat of /proc, then the signal"         "p=\$(cut -d' ' -f4 /proc/4242/stat); $K -TERM \$p"
+refused "pkill from a computed parent"           "p=\$(ps -o ppid= -p 4242); $PK -P \$p"
+
 printf '\n\033[1mAllowed\033[0m\n'
 allowed "a pid that is not the manager"         "$K -TERM 99999999"
 allowed "a test pattern"                        "$PK -f '^cartest123-'"
@@ -63,6 +70,10 @@ allowed "stopping a session unit"               "systemctl --user stop claude-se
 allowed "listing the manager"                   "ps -p $MANAGER"
 allowed "the word in an echo"                   "echo $K the process later"
 allowed "pgrep alone"                           "pgrep -u \$(id -u) -x systemd"
+allowed "ps ppid without a signal"              "ps -o ppid= -p \$\$"
+allowed "a pid the command started"             "sleep 30 & p=\$!; $K \$p"
+allowed "literal pids after reading a parent"   "ps -o ppid= -p 4242; $K 4243 4244"
+allowed "reading /proc stat alone"              "cat /proc/4242/stat"
 allowed "docker kill"                           "docker $K some-container"
 allowed "git with a signal-like word"           "git log --grep='$K'"
 
