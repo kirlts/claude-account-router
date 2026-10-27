@@ -166,6 +166,15 @@ def run(event):
         if status:
             sys.stderr.write(message + "\n")
             return status
+        # Tests of a repository with a cloud path never run on this machine, whoever is working.
+        try:
+            import local_tests_guard
+            status, message = local_tests_guard.refuse(event)
+        except Exception:
+            status, message = 0, ""
+        if status:
+            sys.stderr.write(message + "\n")
+            return status
     project = os.environ.get("CLAUDE_PROJECT_DIR") or event.get("cwd") or ""
     _, routes = load_config()
     if not routes:
