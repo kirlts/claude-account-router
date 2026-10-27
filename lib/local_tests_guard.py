@@ -111,6 +111,8 @@ def runs_tests(words):
     if name == "deno" and rest[:1] == ["test"]:
         return "`deno test`"
     if name == "node" or name.startswith("node") and re.fullmatch(r"node[\d.]*", name):
+        if "--check" in rest or "-c" in rest:
+            return None  # a syntax check executes nothing
         if any(w == "--test" or w.startswith("--test=") or w.startswith("--test-") for w in rest):
             return "`node --test`"
         files = [w for w in rest if not w.startswith("-")]

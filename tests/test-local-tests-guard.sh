@@ -41,6 +41,7 @@ allowed "the cloud path itself"                 "$D"                       "infr
 allowed "a test run on a cloud machine over ssh" "$D"                      "gcloud compute ssh m --command 'cd /x && npm test'"
 allowed "plain ssh with a test inside quotes"   "$D"                       "ssh m 'npm test && node --test a.test.js'"
 allowed "syntax check"                          "$D/plataforma"            "node --check src/a.js"
+allowed "syntax check of a test file"           "$D/plataforma"            "node --check src/a.test.js && echo ok"
 allowed "build"                                 "$D/plataforma"            "npm run build"
 allowed "typecheck"                             "$D/plataforma"            "npx tsc --noEmit"
 allowed "a script that is not a test"           "$D/plataforma"            "node scripts/grabar.mjs"
