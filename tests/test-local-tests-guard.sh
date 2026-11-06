@@ -37,7 +37,7 @@ refused "npm --prefix into the repository"      "$HOME"                    "npm 
 refused "env assignment before the runner"      "$D/plataforma"            "DEVALIS_TANDAS_EN_SERIE=1 npm test"
 
 printf '\n\033[1mAllowed\033[0m\n'
-allowed "the cloud path itself"                 "$D"                       "infra/servidor-de-despliegue/probar.sh wt-x"
+allowed "the cloud path itself"                 "$D"                       "gh workflow run pruebas.yml --ref wt-x -f entera=true"
 allowed "a test run on a cloud machine over ssh" "$D"                      "gcloud compute ssh m --command 'cd /x && npm test'"
 allowed "plain ssh with a test inside quotes"   "$D"                       "ssh m 'npm test && node --test a.test.js'"
 allowed "syntax check"                          "$D/plataforma"            "node --check src/a.js"

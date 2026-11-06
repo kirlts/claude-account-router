@@ -19,8 +19,9 @@ HOME = os.path.expanduser("~")
 # repository root -> the command that runs its tests in the cloud
 CLOUD_TESTS = {
     os.path.join(HOME, "devalis"):
-        "push the branch and run `infra/servidor-de-despliegue/probar.sh <branch>` from the repository: "
-        "it tests the branch against `desarrollo` on a harness machine of devalis-ci-runners",
+        "push the branch and run `gh workflow run pruebas.yml --ref <branch>` from the repository "
+        "(`-f entera=true` for the whole battery), then `gh run watch` in the background: "
+        "GitHub Actions tests the branch against `desarrollo` on a harness machine (devalis-pruebas)",
 }
 
 SHELL_WORDS = {"sudo", "doas", "env", "nohup", "setsid", "exec", "command", "time", "timeout", "nice",
