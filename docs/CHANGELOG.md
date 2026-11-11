@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `claude-account-hooks` no longer marks a session as working in a repository because of a `cd` into it
+  followed by commands that only read. A session opened in OKOS that ran `cd ~/devalis/plataforma && cat ...`
+  was marked as working in that repository, and from then on every prompt received the Devalis reminder
+  (`tools/recordar-las-invariantes.sh`). A Bash line now marks only if some command on it is not on a
+  read-only list (`command_is_readonly`); heredoc bodies are no longer scanned for `cd`. Found on
+  2026-11-10 in session 9266b73f.
+
 ### Added
 
 - A runtime signal guard (`lib/kill_guard.py`, a `kill` function loaded from `~/.bashrc`, and shims for

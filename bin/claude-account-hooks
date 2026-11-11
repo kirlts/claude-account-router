@@ -31,6 +31,7 @@ never gets its hooks executed just because a session looked at it.
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 
@@ -92,7 +93,8 @@ GIT_READONLY_SUBCOMMANDS = {
     "show", "log", "diff", "grep", "ls-files", "ls-tree", "cat-file", "rev-parse",
     "status", "blame", "for-each-ref", "merge-base", "describe", "shortlog", "rev-list",
 }
-GIT_BRANCH_READONLY_FLAGS = {"--list", "-a", "-r", "-v", "-vv", "--color", "--no-color"}
+GIT_BRANCH_READONLY_FLAGS = {"--list", "-a", "-r", "-v", "-vv", "--color", "--no-color", "--contains",
+                             "--no-contains", "--merged", "--no-merged", "--points-at", "--show-current"}
 
 
 def git_c_kind(rest):
@@ -112,6 +114,134 @@ def git_c_kind(rest):
     return "cwd"
 
 
+READONLY_COMMANDS = {
+    "cat", "ls", "head", "tail", "grep", "egrep", "fgrep", "rg", "wc", "sort", "uniq", "cut", "tr",
+    "awk", "echo", "printf", "pwd", "stat", "file", "diff", "cmp", "jq", "column", "basename",
+    "dirname", "realpath", "readlink", "date", "test", "[", "true", "false", ":", "du", "df",
+    "tree", "which", "type", "ps", "sleep", "id", "whoami", "nl", "comm", "cd", "export", "set",
+    "for", "while", "until", "if", "then", "else", "elif", "fi", "do", "done", "in", "case",
+    "esac", "{", "}", "!", "read",
+}
+GIT_BRANCH_TAKES_VALUE = {"--contains", "--no-contains", "--merged", "--no-merged", "--points-at"}
+GIT_GLOBAL_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
+FIND_WRITING = {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprintf", "-fls"}
+HEREDOC = re.compile(r"(<<-?\s*['\"]?(\w+)['\"]?[^\n]*\n).*?^\s*\2\s*$", re.S | re.M)
+SAFE_REDIRECT = re.compile(r">>?\s*(/dev/null|&[0-9-])")
+
+
+def split_shell(text):
+    """Split a shell line into (simple commands, bodies of $( ) and backticks, writes).
+    Quote aware: an operator inside quotes separates nothing. writes is True when an unquoted
+    redirection writes somewhere other than /dev/null or a file descriptor, or a heredoc is
+    present (its body is text, not commands, so the line cannot be classified)."""
+    segs, inner, cur, writes = [], [], [], False
+    i, n, quote = 0, len(text), None
+    while i < n:
+        c = text[i]
+        if quote == "'":
+            cur.append(c)
+            quote = None if c == "'" else quote
+            i += 1
+        elif c == "\\" and i + 1 < n:
+            cur.append(text[i:i + 2])
+            i += 2
+        elif c == "$" and text[i + 1:i + 2] == "(" and text[i + 1:i + 3] != "((":
+            depth, j = 1, i + 2
+            while j < n and depth:
+                depth += (text[j] == "(") - (text[j] == ")")
+                j += 1
+            inner.append(text[i + 2:j - 1])
+            cur.append("X")
+            i = j
+        elif c == "`":
+            j = text.find("`", i + 1)
+            j = n if j < 0 else j
+            inner.append(text[i + 1:j])
+            cur.append("X")
+            i = j + 1
+        elif quote == '"':
+            cur.append(c)
+            quote = None if c == '"' else quote
+            i += 1
+        elif c in "'\"":
+            quote = c
+            cur.append(c)
+            i += 1
+        elif c == "<" and text[i + 1:i + 2] == "<":
+            writes = True
+            i += 2
+        elif c == ">":
+            writes = writes or not SAFE_REDIRECT.match(text, i)
+            cur.append(c)
+            i += 1
+        elif c in ";|&\n()" and not (c == "&" and (text[i - 1:i] == ">" or text[i + 1:i + 2] == ">")):
+            segs.append("".join(cur))
+            cur = []
+            i += 1
+        else:
+            cur.append(c)
+            i += 1
+    segs.append("".join(cur))
+    return [x.strip() for x in segs if x.strip()], inner, writes
+
+
+def git_readonly(words):
+    i = 1
+    while i < len(words) and words[i].startswith("-"):
+        i += 2 if words[i] in GIT_GLOBAL_WITH_VALUE else 1
+    if i >= len(words):
+        return True
+    sub, args = words[i], words[i + 1:]
+    if sub in GIT_READONLY_SUBCOMMANDS or sub == "fetch":
+        return True
+    if sub == "branch":
+        return all(a in GIT_BRANCH_READONLY_FLAGS or (i and args[i - 1] in GIT_BRANCH_TAKES_VALUE)
+                   for i, a in enumerate(args))
+    if sub == "config":
+        return args[:1] == ["--get"]
+    if sub in ("worktree", "stash"):
+        return args[:1] == ["list"]
+    if sub == "remote":
+        return args[:1] in ([], ["-v"], ["show"], ["get-url"])
+    if sub == "tag":
+        return args[:1] in ([], ["-l"], ["--list"])
+    return False
+
+
+def command_is_readonly(command, depth=0):
+    """True when every command in a shell line only reads: no write redirection, no heredoc,
+    each command on the read-only list, git subcommands and find flags checked. Anything not
+    recognized counts as writing, so an unfamiliar command still marks the session."""
+    if depth > 4:
+        return False
+    segs, inner, writes = split_shell(command)
+    if writes or not all(command_is_readonly(x, depth + 1) for x in inner):
+        return False
+    for seg in segs:
+        try:
+            words = shlex.split(re.sub(r"[0-9&]?>>?\s*(?:/dev/null|&[0-9-])", " ", seg))
+        except ValueError:
+            return False
+        while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
+            words = words[1:]
+        if not words:
+            continue
+        name = os.path.basename(words[0])
+        if name == "git":
+            if not git_readonly(words):
+                return False
+        elif name == "sed":
+            if any(w == "--in-place" or (w.startswith("-") and not w.startswith("--") and "i" in w)
+                   for w in words[1:]):
+                return False
+        elif name == "find":
+            if FIND_WRITING & set(words):
+                return False
+        elif name not in READONLY_COMMANDS:
+            return False
+    return True
+
+
 def candidate_paths(event):
     tool_input = event.get("tool_input") or {}
     found = []
@@ -121,10 +251,14 @@ def candidate_paths(event):
             found.append(("write" if event.get("tool_name") in WRITE_TOOLS else "read", expand(v)))
     command = tool_input.get("command")
     if isinstance(command, str):
-        for m in re.finditer(r"(?:^|[\s;&|(])(cd|-C)\s+['\"]?((?:~|/)[^\s'\";&|()]*)", command):
-            kind = "cwd"
-            if m.group(1) == "-C" and re.search(r"\bgit\s+$", command[:m.start(1)]):
-                kind = git_c_kind(command[m.end():])
+        # A line that only reads, wherever it runs from, is not work in that repository.
+        readonly = command_is_readonly(command)
+        # Text fed to a command through a heredoc is data: a "cd" inside it is not a cd.
+        script = HEREDOC.sub(lambda m: m.group(1), command)
+        for m in re.finditer(r"(?:^|[\s;&|(])(cd|-C)\s+['\"]?((?:~|/)[^\s'\";&|()]*)", script):
+            kind = "read" if readonly else "cwd"
+            if kind == "cwd" and m.group(1) == "-C" and re.search(r"\bgit\s+$", script[:m.start(1)]):
+                kind = git_c_kind(script[m.end():])
             found.append((kind, expand(m.group(2))))
         for m in re.finditer(r"(?:~|/home|/Users)[^\s'\"`;&|()<>]*", command):
             found.append(("read", expand(m.group(0))))
