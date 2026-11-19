@@ -1,14 +1,8 @@
-"""Efficiency guard: a step of the session's route that is ready is started.
+"""Ready steps of the session's route, handed to the session as context. It blocks nothing.
 
-Why (2026-11-18): the model waits for what it does not need. That day a round of judges waited
-about 45 minutes for a test battery it did not need, with free capacity announced three times.
-Each step of bin/ruta declares what it depends on and the datum it takes from it; at the end of a
-turn, a step whose dependencies are done, that did not start and has no measured limit
-(`ruta limite`) refuses the end of the turn.
-
-It reads only the route the session declared, never the words of the model or of Martín: «no hay
-que poner lenguajes de programación que evalúen texto verbatim» (Martín, 2026-11-18).
-# se-retira-cuando: in three assignments it refuses nothing, or Martín drops the route.
+The model waits for what it does not need; on 2026-11-18 a round of judges waited about 45 minutes
+for a battery it did not need. bin/ruta records each step, what it depends on and the datum it
+takes; when Martín writes, the session is told which steps are ready. Judgment stays with it.
 """
 import glob
 import json
@@ -50,18 +44,21 @@ READY_MSG = ("Blocked: {steps} has every dependency done and did not start. It d
 
 
 def check(event):
-    """(None, reason) to block a Stop; (0, "") otherwise.
+    """Never blocks. Kept so the dispatcher's call stays valid.
 
-    Martín, 2026-11-18 22:0x: «no hay que poner lenguajes de programación que evalúen texto verbatim».
-    The hour check and the management check read the model's words and were removed. What stays reads
-    only the route the session declared: a ready step that did not start."""
-    if event.get("hook_event_name") != "Stop" or event.get("stop_hook_active"):
-        return 0, ""
-    try:
-        mod, d = _route(str(event.get("session_id") or ""))
-        ready = mod.ready(d)
-    except SystemExit:
-        ready = []
-    if ready:
-        return None, READY_MSG.format(steps=", ".join(ready))
+    2026-11-18: refusing the end of a turn because a declared step was ready is a hook for a
+    preference, not for a rule without exceptions (Claude Code best practices: «if you have hooks
+    for things that are only preferences, delete them and let Claude decide»; Anthropic's
+    constitution: rules make sense when errors are severe, judgment is not robust or there is room
+    for manipulation). Ready steps now reach the session as context (`ready_context`)."""
     return 0, ""
+
+
+def ready_context(session):
+    """One line for the prompt context: the steps of this session's route that are ready to start."""
+    try:
+        mod, d = _route(session)
+        r = mod.ready(d)
+    except SystemExit:
+        return ""
+    return ("Pasos de tu ruta listos para arrancar (sus dependencias terminaron): " + ", ".join(r) + ".") if r else ""

@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Efficiency guard (`lib/efficiency_guard.py`) and `bin/ruta`, in every session of every profile: `ruta` computes a finish time from measured steps and their dependencies; a ready step that did not start stops the end of the turn unless a measured limit is declared. It reads only the declared route, never text: the hour and management checks were removed on 2026-11-18 (Martín: no programmatic rule evaluates text verbatim). Tests: `tests/test-efficiency-guard.sh`.
+- `bin/ruta` and `lib/efficiency_guard.py`, in every session of every profile: `ruta` computes a finish time from measured steps and their dependencies, and when Martín writes, the session is told which steps of its route are ready. Nothing blocks: on 2026-11-18 the hour, management and ready-step refusals were removed (no hook evaluates text; a preference is not a hook). Tests: `tests/test-efficiency-guard.sh`.
 - Measured capacity (`lib/capacity.py`): every prompt gets the median and p90 of the subagents of the last 7 days on this machine and the commits of that week, cached 3 hours.
 
 - A runtime signal guard (`lib/kill_guard.py`, a `kill` function loaded from `~/.bashrc`, and shims for

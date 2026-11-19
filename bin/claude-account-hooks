@@ -331,6 +331,10 @@ def run(event):
             c = capacity.context()
             if c:
                 capacity_context.append(c)
+            import efficiency_guard
+            r = efficiency_guard.ready_context(str(event.get("session_id") or ""))
+            if r:
+                capacity_context.append(r)
         except Exception:
             pass
     project = os.environ.get("CLAUDE_PROJECT_DIR") or event.get("cwd") or ""
@@ -338,7 +342,7 @@ def run(event):
     if not routes:
         if capacity_context:
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
-                                                     "additionalContext": capacity_context[0]}}, ensure_ascii=False))
+                                                     "additionalContext": "\n".join(capacity_context)}}, ensure_ascii=False))
         return 0
     own_route = route_for(expand(project), routes) if project else None
     session = str(event.get("session_id") or "")

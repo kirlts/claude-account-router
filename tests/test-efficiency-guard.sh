@@ -35,21 +35,16 @@ echo "$out" | grep -q "en serie serían 101" && ok "reports what the serial sum 
 "$RUTA" paso x --min 5 2>/dev/null && no "accepted a step without source" || ok "refuses a step without --fuente"
 "$RUTA" paso y --min 5 --fuente f --depende armado 2>/dev/null && no "accepted a dependency without --necesita" || ok "refuses a dependency without the datum it needs"
 
-printf '\n\033[1mB. Ready steps\033[0m\n'
+printf '\n\033[1mB. Ready steps reach the session as context, nothing blocks\033[0m\n'
 "$RUTA" paso informe --min 10 --fuente "informe r13" --depende batería --necesita "resultado de la batería" >/dev/null
 "$RUTA" paso capturas --min 8 --fuente "capturas r14" >/dev/null
 "$RUTA" inicia batería; "$RUTA" inicia armado
 f=$(tr r1 "u|ok" "a|20:59|x")
-blocked "an independent step ready and not started" "$f"
-"$RUTA" limite capturas --dato "memoria libre 1,2 GB, un agente usa 2,1 GB" >/dev/null
-passes "the same step with a measured limit" "$f"
+passes "a ready step does not block the end of the turn" "$f"
+ctx=$(jq -nc '{hook_event_name:"UserPromptSubmit",session_id:"s1",prompt:"hola",cwd:"/home/kirlts"}' | "$HOOKS" run | jq -r '.hookSpecificOutput.additionalContext // ""')
+printf '%s' "$ctx" | grep -q "capturas" && ok "the ready step reaches the session when Martín writes" || no "ready step missing from context: $ctx"
+printf '%s' "$ctx" | grep -q "informe" && no "a step waiting on its dependency was listed as ready" || ok "a step whose dependency is running is not listed"
 "$RUTA" limite informe 2>/dev/null && no "accepted a limit without a measurement" || ok "refuses a limit without --dato"
-"$RUTA" inicia capturas; passes "step started" "$f"
-
-printf '\n\033[1mSabotage\033[0m\n'
-"$RUTA" paso z --min 5 --fuente f >/dev/null
-f=$(tr z1 "u|ok" "a|20:59|x")
-[ -z "$(EFICIENCIA_GUARD=0 stop "$f")" ] && ok "with the guard off a ready step passes (the cases above depend on it)" || no "guard off still blocks"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]
