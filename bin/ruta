@@ -4,8 +4,8 @@
 A model estimates as if it were a person working one thing after another (Kairós, "Zero Delays":
 an estimate anchored to human limits is a model bias). Martín corrected that by hand 79 times in
 one month. Here every step carries a measured duration and the steps it needs; the hour is computed.
-The efficiency guard (lib/efficiency_guard.py) refuses a future hour that does not come from here,
-and a turn that ends while a step is ready and was not started.
+The efficiency guard (lib/efficiency_guard.py) refuses a turn that ends while a step is ready and
+was not started.
 
   ruta paso <id> --min N --fuente <where N was measured> [--depende a,b --necesita "<datum>"]
   ruta inicia <id> | ruta termina <id>
@@ -140,8 +140,8 @@ def main(a):
         dato = opt.get("--dato", "")
         if i not in pasos:
             sys.exit(f"ruta: unknown step {i}")
-        if not re.search(r"\d", dato):
-            sys.exit("ruta: --dato carries the measurement (free memory, quota reset hour), with its number")
+        if not dato:
+            sys.exit("ruta: --dato carries the measurement (free memory, quota reset)")
         pasos[i]["limite"] = dato
         save(d)
     elif cmd == "borra":
