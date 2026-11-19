@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""ruta: the finish time of a piece of work comes from its critical path, not from adding steps.
+
+A model estimates as if it were a person working one thing after another (Kairós, "Zero Delays":
+an estimate anchored to human limits is a model bias). Martín corrected that by hand 79 times in
+one month. Here every step carries a measured duration and the steps it needs; the hour is computed.
+The efficiency guard (lib/efficiency_guard.py) refuses a future hour that does not come from here,
+and a turn that ends while a step is ready and was not started.
+
+  ruta paso <id> --min N --fuente <where N was measured> [--depende a,b --necesita "<datum>"]
+  ruta inicia <id> | ruta termina <id>
+  ruta limite <id> --dato "<measurement>"   the ready step cannot start: memory or quota, measured
+  ruta hora                                 finish time of each step and of the whole, critical path
+  ruta listos                               steps whose dependencies are done and that did not start
+  ruta borra                                forget this session's route
+
+State: ~/.cache/claude-ruta/<session id>.json (CLAUDE_CODE_SESSION_ID, or RUTA_SESION).
+"""
+import json
+import os
+import re
+import sys
+import time
+from datetime import datetime
+
+DIR = os.environ.get("RUTA_DIR", os.path.expanduser("~/.cache/claude-ruta"))
+
+
+def path(session=None):
+    s = session or os.environ.get("RUTA_SESION") or os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
+    if not s:
+        sys.exit("ruta: no session id (CLAUDE_CODE_SESSION_ID)")
+    return os.path.join(DIR, re.sub(r"[^\w.-]", "_", s) + ".json")
+
+
+def load(session=None):
+    try:
+        return json.load(open(path(session)))
+    except (OSError, ValueError):
+        return {"pasos": {}}
+
+
+def save(d):
+    os.makedirs(DIR, exist_ok=True)
+    tmp = path() + ".tmp"
+    json.dump(d, open(tmp, "w"), ensure_ascii=False, indent=1)
+    os.replace(tmp, path())
+
+
+def now():
+    return float(os.environ.get("RUTA_AHORA") or time.time())
+
+
+def schedule(d, t0=None):
+    """Earliest finish (epoch) of every step: running steps finish at start + duration, pending ones
+    start when their dependencies finish (or now), done steps count as finished."""
+    t0 = t0 if t0 is not None else now()
+    pasos, fin = d.get("pasos", {}), {}
+
+    def f(i, seen=()):
+        if i in fin:
+            return fin[i]
+        if i in seen:
+            raise SystemExit(f"ruta: cycle at {i}")
+        p = pasos.get(i)
+        if p is None:
+            return t0
+        if p.get("termino"):
+            fin[i] = p["termino"]
+        elif p.get("inicio"):
+            fin[i] = max(t0, p["inicio"] + p["min"] * 60)
+        else:
+            fin[i] = max([t0] + [f(x, seen + (i,)) for x in p.get("depende", [])]) + p["min"] * 60
+        return fin[i]
+
+    for i in pasos:
+        f(i)
+    return fin
+
+
+def ready(d):
+    pasos = d.get("pasos", {})
+    out = []
+    for i, p in pasos.items():
+        if p.get("inicio") or p.get("termino") or p.get("limite"):
+            continue
+        if all(pasos.get(x, {}).get("termino") for x in p.get("depende", [])):
+            out.append(i)
+    return out
+
+
+def hhmm(t):
+    return datetime.fromtimestamp(t).strftime("%H:%M")
+
+
+def main(a):
+    if not a:
+        sys.exit(__doc__)
+    cmd, d = a[0], load()
+    pasos = d.setdefault("pasos", {})
+    opt = {}
+    rest = a[1:]
+    pos = [x for x in rest if not x.startswith("--")]
+    for k in ("--min", "--fuente", "--depende", "--necesita", "--dato"):
+        if k in rest:
+            j = rest.index(k)
+            opt[k] = rest[j + 1] if j + 1 < len(rest) else ""
+            if opt[k] in pos:
+                pos.remove(opt[k])
+    if cmd == "paso":
+        if not pos:
+            sys.exit("ruta paso <id> --min N --fuente <...>")
+        i = pos[0]
+        try:
+            m = float(opt.get("--min", "").replace(",", "."))
+        except ValueError:
+            sys.exit("ruta: --min must be the measured minutes")
+        if not opt.get("--fuente"):
+            sys.exit("ruta: --fuente is required: where those minutes were measured (a run, a log, a judge already run)")
+        dep = [x for x in opt.get("--depende", "").split(",") if x]
+        if dep and not opt.get("--necesita"):
+            sys.exit("ruta: a dependency needs --necesita: the datum this step takes from it")
+        for x in dep:
+            if x not in pasos:
+                sys.exit(f"ruta: unknown dependency {x}; declare it first")
+        pasos[i] = {**pasos.get(i, {}), "min": m, "fuente": opt["--fuente"], "depende": dep,
+                    "necesita": opt.get("--necesita", "")}
+        save(d)
+    elif cmd in ("inicia", "termina"):
+        i = pos[0] if pos else ""
+        if i not in pasos:
+            sys.exit(f"ruta: unknown step {i}")
+        pasos[i]["inicio" if cmd == "inicia" else "termino"] = now()
+        if cmd == "termina":
+            pasos[i].setdefault("inicio", pasos[i]["termino"])
+        pasos[i].pop("limite", None)
+        save(d)
+    elif cmd == "limite":
+        i = pos[0] if pos else ""
+        dato = opt.get("--dato", "")
+        if i not in pasos:
+            sys.exit(f"ruta: unknown step {i}")
+        if not re.search(r"\d", dato):
+            sys.exit("ruta: --dato carries the measurement (free memory, quota reset hour), with its number")
+        pasos[i]["limite"] = dato
+        save(d)
+    elif cmd == "borra":
+        try:
+            os.remove(path())
+        except OSError:
+            pass
+    elif cmd == "listos":
+        for i in ready(d):
+            print(i)
+    elif cmd == "hora":
+        if not pasos:
+            sys.exit("ruta: empty")
+        fin = schedule(d)
+        serie = sum(p["min"] for p in pasos.values() if not p.get("termino"))
+        for i, t in sorted(fin.items(), key=lambda x: x[1]):
+            p = pasos[i]
+            estado = "terminado" if p.get("termino") else "en curso" if p.get("inicio") else "pendiente"
+            print(f"{i}: {hhmm(t)} ({estado}, {p['min']:g} min, {p['fuente']})")
+        total = (max(fin.values()) - now()) / 60
+        print(f"total: {hhmm(max(fin.values()))}, ruta crítica {max(total, 0):.0f} min; en serie serían {serie:g} min")
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

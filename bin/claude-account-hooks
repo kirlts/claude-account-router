@@ -309,9 +309,36 @@ def run(event):
         if status:
             sys.stderr.write(message + "\n")
             return status
+    if event.get("hook_event_name") in ("PreToolUse", "Stop") and os.environ.get("EFICIENCIA_GUARD", "1") != "0":
+        # An hour from a critical path, a ready step started, and no empty reports to a director.
+        try:
+            sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "lib"))
+            import efficiency_guard
+            status, message = efficiency_guard.check(event)
+        except Exception:  # a broken guard must not block unrelated work
+            status, message = 0, ""
+        if status is None:
+            print(json.dumps({"decision": "block", "reason": message}, ensure_ascii=False))
+            return 0
+        if status:
+            sys.stderr.write(message + "\n")
+            return status
+    capacity_context = []
+    if event.get("hook_event_name") == "UserPromptSubmit" and os.environ.get("EFICIENCIA_GUARD", "1") != "0":
+        try:  # measured capacity of this machine: the model does not know what it did
+            sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "lib"))
+            import capacity
+            c = capacity.context()
+            if c:
+                capacity_context.append(c)
+        except Exception:
+            pass
     project = os.environ.get("CLAUDE_PROJECT_DIR") or event.get("cwd") or ""
     _, routes = load_config()
     if not routes:
+        if capacity_context:
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+                                                     "additionalContext": capacity_context[0]}}, ensure_ascii=False))
         return 0
     own_route = route_for(expand(project), routes) if project else None
     session = str(event.get("session_id") or "")
@@ -347,7 +374,7 @@ def run(event):
         active += [r for r in touched if r not in active]
     active = [r for r in active if r != own_route]
 
-    contexts, stdin = [], json.dumps(event)
+    contexts, stdin = list(capacity_context), json.dumps(event)
     for route in active:
         root = repo_root(route)
         env = dict(os.environ, CLAUDE_PROJECT_DIR=root)
