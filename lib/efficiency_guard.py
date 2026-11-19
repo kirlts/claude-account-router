@@ -63,8 +63,13 @@ def _typed_by_person(r):
     if isinstance(c, list) and any(isinstance(x, dict) and x.get("type") == "tool_result" for x in c):
         return False
     t = _text(c).strip()
+    if t.lstrip("[ ").startswith(CONTINUATIONS):
+        return False
     return bool(t) and not t.startswith(("<", "Another Claude", "Stop hook", "[Request", "This session is being continued", "[SYSTEM")) \
         and "cross-session-message" not in t[:300] and "task-notification" not in t[:300]
+
+
+CONTINUATIONS = ("Your previous response had no visible output", "Stop hook feedback", "Stop hook blocking")
 
 
 def _turn(path):
@@ -80,6 +85,8 @@ def _turn(path):
             c = (r.get("message") or {}).get("content")
             if isinstance(c, list) and any(isinstance(x, dict) and x.get("type") == "tool_result" for x in c):
                 continue
+            if _text(c).lstrip(" [\n").startswith(CONTINUATIONS):
+                continue  # the harness asking to go on after a block or an empty answer: same turn
             start, by_person = i, _typed_by_person(r)
             break
     texts = [_text((r.get("message") or {}).get("content")) for r in rs[start:] if r.get("type") == "assistant"]
@@ -140,7 +147,7 @@ READY_MSG = ("Blocked: {steps} has every dependency done and did not start. It d
              "waiting for: start it now (`ruta inicia <id>`). If a real limit stops it, declare it with the measurement: "
              "`ruta limite <id> --dato \"<free memory or quota reset, with the number>\"`.")
 MGMT_MSG = ("Blocked: this turn was not started by Martín, and its text changes no hour, delivers nothing he can open "
-            "and asks him nothing. A director is not told that nothing changed. End the turn without text; write to him "
+            "and asks him nothing. A director is not told that nothing changed. End the turn with just «·»; write to him "
             "only when an hour moves, something is ready to open, or a decision is his.")
 
 
@@ -170,7 +177,7 @@ def check(event):
         ready = []
     if ready:
         return None, READY_MSG.format(steps=", ".join(ready))
-    if final.strip() and not by_person and _is_management(transcript):
+    if len(final.strip()) > 3 and not by_person and _is_management(transcript):  # "·" is the empty answer
         hours = {s for s, _ in _future(final)}
         if not (hours - earlier) and not re.search(r"https?://", final) and "?" not in final:
             return None, MGMT_MSG

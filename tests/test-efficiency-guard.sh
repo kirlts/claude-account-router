@@ -75,6 +75,13 @@ passes "management asking a decision" "$f"
 f=$(tr g5 "u|cómo va" "n|monitor event" "a|20:59|Las horas no cambian.")
 passes "the same text in a session that is not management" "$f"
 
+f=$(tr g6 "u|cómo va" "n|monitor event" "a|20:58|Las horas no cambian." "u|[Your previous response had no visible output. Please continue and produce a user-visible response." "a|20:59|·")
+echo "{\"sesiones\":{\"gestion\":{\"transcripcion\":\"$f\"}}}" > "$T/reg/ov6.json"
+passes "management answering «·» after the harness asks for visible output (no loop)" "$f"
+f=$(tr g7 "u|cómo va" "n|monitor event" "a|20:58|x" "u|Stop hook feedback: Blocked" "a|20:59|Las horas no cambian.")
+echo "{\"sesiones\":{\"gestion\":{\"transcripcion\":\"$f\"}}}" > "$T/reg/ov7.json"
+blocked "a continuation after a block is still the notification's turn" "$f"
+
 printf '\n\033[1mSabotage\033[0m\n'
 f=$(tr s1 "u|cómo va" "a|20:59|Los jueces terminan a las 22:41.")
 [ -z "$(EFICIENCIA_GUARD=0 stop "$f")" ] && ok "with the guard off the serial hour passes (the cases above depend on it)" || no "guard off still blocks"
